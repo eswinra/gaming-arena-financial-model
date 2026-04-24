@@ -603,22 +603,28 @@ with tab8:
             return "background-color: #f8d7da; color: #721c24; font-weight: bold"
         return ""
 
-    display_sc = scorecard.copy()
-    # Format for display
-    for idx_sc in range(len(display_sc)):
-        unit = display_sc.iloc[idx_sc]["Unit"]
+    # Build a string-typed DataFrame to avoid pandas type errors
+    sc_rows = []
+    for idx_sc in range(len(scorecard)):
+        row = scorecard.iloc[idx_sc]
+        unit = row["Unit"]
         if unit == "$":
-            display_sc.iloc[idx_sc, display_sc.columns.get_loc("Target")] = f"${scorecard.iloc[idx_sc]['Target']:,.0f}"
-            display_sc.iloc[idx_sc, display_sc.columns.get_loc("Actual")] = f"${scorecard.iloc[idx_sc]['Actual']:,.0f}"
+            t_fmt = f"${row['Target']:,.0f}"
+            a_fmt = f"${row['Actual']:,.0f}"
         elif unit == "%":
-            display_sc.iloc[idx_sc, display_sc.columns.get_loc("Target")] = f"{scorecard.iloc[idx_sc]['Target']:.1%}"
-            display_sc.iloc[idx_sc, display_sc.columns.get_loc("Actual")] = f"{scorecard.iloc[idx_sc]['Actual']:.1%}"
+            t_fmt = f"{row['Target']:.1%}"
+            a_fmt = f"{row['Actual']:.1%}"
         else:
-            display_sc.iloc[idx_sc, display_sc.columns.get_loc("Target")] = f"{scorecard.iloc[idx_sc]['Target']:.2f}x"
-            display_sc.iloc[idx_sc, display_sc.columns.get_loc("Actual")] = f"{scorecard.iloc[idx_sc]['Actual']:.2f}x"
-        display_sc.iloc[idx_sc, display_sc.columns.get_loc("Variance (%)")] = f"{scorecard.iloc[idx_sc]['Variance (%)']:+.1%}"
-
-    display_sc = display_sc[["KPI", "Target", "Actual", "Variance (%)", "RAG"]]
+            t_fmt = f"{row['Target']:.2f}x"
+            a_fmt = f"{row['Actual']:.2f}x"
+        sc_rows.append({
+            "KPI": row["KPI"],
+            "Target": t_fmt,
+            "Actual": a_fmt,
+            "Variance": f"{row['Variance (%)']:+.1%}",
+            "RAG": row["RAG"],
+        })
+    display_sc = pd.DataFrame(sc_rows)
     styled_sc = display_sc.style.map(color_rag, subset=["RAG"])
     st.dataframe(styled_sc, use_container_width=True, hide_index=True)
 
