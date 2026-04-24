@@ -184,7 +184,7 @@ st.divider()
 # TABBED SECTIONS
 # =============================================================================
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "Income Statement",
     "Cash Flow & Balance Sheet",
     "Scenarios",
@@ -194,6 +194,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "Variance Analysis",
     "KPI Scorecard",
     "Cost Drivers",
+    "Assumptions Lab",
 ])
 
 # --- TAB 1: Income Statement ---
@@ -670,60 +671,13 @@ with tab9:
         "Sliders below let you simulate rent negotiations, staffing changes, and other cost levers."
     )
 
-    # ---- Current cost breakdown ----
-    # Pull Year 1 baseline from the model already computed above
     y1_rev = inc.loc["Total Revenue", y1]
-    y1_opex_items = []
-    for name, category, base_amount in OPEX_BUDGET:
-        if name == "Merchant & Card Processing Fees":
-            amt = y1_rev * a["fees"]["merchant_processing_pct"]
-        else:
-            amt = base_amount
-        y1_opex_items.append({"Expense": name, "Amount": amt, "Category": category})
 
-    # Add depreciation and interest for full picture
-    y1_opex_items.append({"Expense": "Depreciation", "Amount": a["depreciation"]["annual_depreciation"], "Category": "non-cash"})
-    y1_opex_items.append({"Expense": "Interest Expense", "Amount": a["debt"]["loan_amount"] * a["debt"]["interest_rate"], "Category": "financing"})
-
-    cost_df = pd.DataFrame(y1_opex_items)
-    cost_df["% of Revenue"] = cost_df["Amount"] / y1_rev
-    cost_df = cost_df.sort_values("Amount", ascending=True)  # ascending for horizontal bar
-
-    # Horizontal bar chart — biggest expenses at top
-    st.markdown("**Year 1 Cost Breakdown (sorted by size)**")
-    fig_cost, ax_cost = plt.subplots(figsize=(9, 5))
-    bar_colors = []
-    for _, row in cost_df.iterrows():
-        if row["Amount"] >= 30_000:
-            bar_colors.append("#e15759")   # red = high-impact
-        elif row["Amount"] >= 10_000:
-            bar_colors.append("#f28e2b")   # orange = moderate
-        else:
-            bar_colors.append("#76b7b2")   # teal = low
-    ax_cost.barh(cost_df["Expense"], cost_df["Amount"], color=bar_colors)
-    ax_cost.set_xlabel("Annual Amount ($)")
-    ax_cost.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
-
-    # Annotate % of revenue on each bar
-    for i, (_, row) in enumerate(cost_df.iterrows()):
-        ax_cost.text(
-            row["Amount"] + y1_rev * 0.005, i,
-            f"{row['% of Revenue']:.1%}",
-            va="center", fontsize=8, color="#555",
-        )
-
-    ax_cost.set_title("Annual Expenses — Red = High Impact, Orange = Moderate, Teal = Low")
-    plt.tight_layout()
-    st.pyplot(fig_cost)
-    plt.close(fig_cost)
-
-    st.divider()
-
-    # ---- What-If Cost Adjustments ----
-    st.markdown("### What-If: Adjust Cost Levers")
+    # ---- What-If Cost Adjustments (sliders FIRST so chart can use them) ----
+    st.markdown("### Adjust Cost Levers")
     st.caption(
         "Drag the sliders to test scenarios like negotiating lower rent, "
-        "cutting staff hours, or reducing marketing spend. The model recalculates instantly."
+        "cutting staff hours, or reducing marketing spend. The chart and metrics update instantly."
     )
 
     # Define adjustable cost levers with their base amounts and reasonable ranges
@@ -765,9 +719,7 @@ with tab9:
             help="Base: $6,000. Organic growth vs paid acquisition tradeoff.",
         )
 
-    # Recalculate with adjusted costs
-    adjusted_opex = 0
-    original_opex = 0
+    # Build adjustments map
     adjustments_map = {
         "Rent and CAM": adj_rent,
         "Owner Salary": adj_owner,
@@ -777,28 +729,77 @@ with tab9:
         "Marketing and Advertising": adj_marketing,
     }
 
-    for name, category, base_amount in OPEX_BUDGET:
-        if name == "Merchant & Card Processing Fees":
-            original_opex += y1_rev * a["fees"]["merchant_processing_pct"]
-            adjusted_opex += y1_rev * a["fees"]["merchant_processing_pct"]
-        elif name in adjustments_map:
-            original_opex += base_amount
-            adjusted_opex += adjustments_map[name]
-        else:
-            original_opex += base_amount
-            adjusted_opex += base_amount
-
-    # Also add payroll taxes adjustment proportional to wage change
-    # If wages change, payroll taxes scale proportionally
+    # Payroll taxes scale proportionally with wages
     wage_ratio = adj_wages / 65_700 if 65_700 > 0 else 1.0
     payroll_tax_base = 13_284
     adj_payroll_tax = payroll_tax_base * wage_ratio
-    # Already counted base payroll taxes in the loop above, adjust the delta
-    adjusted_opex += (adj_payroll_tax - payroll_tax_base)
 
+    # ---- Cost breakdown chart (uses slider values) ----
+    st.divider()
+    y1_opex_items = []
+    adjusted_opex = 0
+    original_opex = 0
+
+    for name, category, base_amount in OPEX_BUDGET:
+        if name == "Merchant & Card Processing Fees":
+            amt = y1_rev * a["fees"]["merchant_processing_pct"]
+            original_opex += amt
+            adjusted_opex += amt
+        elif name == "Payroll Taxes and Benefits":
+            original_opex += base_amount
+            adjusted_opex += adj_payroll_tax
+            amt = adj_payroll_tax
+        elif name in adjustments_map:
+            original_opex += base_amount
+            adjusted_opex += adjustments_map[name]
+            amt = adjustments_map[name]
+        else:
+            original_opex += base_amount
+            adjusted_opex += base_amount
+            amt = base_amount
+        y1_opex_items.append({"Expense": name, "Amount": amt, "Category": category})
+
+    # Add depreciation and interest for full picture
     depreciation = a["depreciation"]["annual_depreciation"]
     interest = a["debt"]["loan_amount"] * a["debt"]["interest_rate"]
+    y1_opex_items.append({"Expense": "Depreciation", "Amount": depreciation, "Category": "non-cash"})
+    y1_opex_items.append({"Expense": "Interest Expense", "Amount": interest, "Category": "financing"})
 
+    cost_df = pd.DataFrame(y1_opex_items)
+    cost_df["% of Revenue"] = cost_df["Amount"] / y1_rev
+    cost_df = cost_df.sort_values("Amount", ascending=True)  # ascending for horizontal bar
+
+    # Horizontal bar chart — reflects slider values
+    st.markdown("**Year 1 Cost Breakdown (sorted by size — reflects slider adjustments)**")
+    fig_cost, ax_cost = plt.subplots(figsize=(9, 5))
+    bar_colors = []
+    for _, row in cost_df.iterrows():
+        if row["Amount"] >= 30_000:
+            bar_colors.append("#e15759")   # red = high-impact
+        elif row["Amount"] >= 10_000:
+            bar_colors.append("#f28e2b")   # orange = moderate
+        else:
+            bar_colors.append("#76b7b2")   # teal = low
+    ax_cost.barh(cost_df["Expense"], cost_df["Amount"], color=bar_colors)
+    ax_cost.set_xlabel("Annual Amount ($)")
+    ax_cost.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+
+    # Annotate % of revenue on each bar
+    for i, (_, row) in enumerate(cost_df.iterrows()):
+        ax_cost.text(
+            row["Amount"] + y1_rev * 0.005, i,
+            f"{row['% of Revenue']:.1%}",
+            va="center", fontsize=8, color="#555",
+        )
+
+    ax_cost.set_title("Annual Expenses — Red = High Impact, Orange = Moderate, Teal = Low")
+    plt.tight_layout()
+    st.pyplot(fig_cost)
+    plt.close(fig_cost)
+
+    st.divider()
+
+    # ---- Profitability calculations ----
     # F&B COGS
     fnb_rev = a["fnb"]["year1_revenue"]
     fnb_cogs = fnb_rev * a["fnb"]["cogs_pct"]
@@ -814,8 +815,6 @@ with tab9:
     adj_pretax = adj_ebit - interest
 
     opex_savings = original_opex - adjusted_opex
-
-    st.divider()
 
     # ---- Impact Summary ----
     st.markdown("### Impact on Profitability")
@@ -922,6 +921,299 @@ with tab9:
     plt.tight_layout()
     st.pyplot(fig_lever)
     plt.close(fig_lever)
+
+# --- TAB 10: Assumptions Lab ---
+with tab10:
+    import copy
+    import config as config_module
+
+    st.subheader("Assumptions Lab")
+    st.caption(
+        "Change any structural assumption and see how it flows through the full "
+        "3-statement model. The base case (from config.py) is shown alongside "
+        "your adjusted case so you can measure the impact of each change."
+    )
+
+    # ---- Current assumptions reference ----
+    st.markdown("### Adjust Model Assumptions")
+
+    alab_col1, alab_col2, alab_col3 = st.columns(3)
+
+    with alab_col1:
+        st.markdown("**Debt & Financing**")
+        alab_loan = st.slider(
+            "SBA Loan Amount ($)",
+            min_value=100_000, max_value=300_000,
+            value=a["debt"]["loan_amount"], step=10_000,
+            help=f"Base: ${a['debt']['loan_amount']:,}. Total project cost = loan + equity.",
+        )
+        alab_rate = st.slider(
+            "Interest Rate (%)",
+            min_value=4.0, max_value=15.0,
+            value=a["debt"]["interest_rate"] * 100, step=0.25,
+            help=f"Base: {a['debt']['interest_rate']:.0%}. SBA 7(a) rates vary by market.",
+        )
+        alab_principal = st.slider(
+            "Annual Principal Payment ($)",
+            min_value=0, max_value=30_000,
+            value=a["debt"]["annual_principal_payment"], step=1_000,
+            help=f"Base: ${a['debt']['annual_principal_payment']:,}/yr.",
+        )
+
+    with alab_col2:
+        st.markdown("**Growth & Revenue**")
+        alab_rev_growth = st.slider(
+            "Annual Revenue Growth (%)",
+            min_value=0.0, max_value=10.0,
+            value=a["growth"]["annual_revenue_growth"] * 100, step=0.5,
+            help=f"Base: {a['growth']['annual_revenue_growth']:.1%}. Applied to Years 2+.",
+        )
+        alab_exp_growth = st.slider(
+            "Annual Expense Growth (%)",
+            min_value=0.0, max_value=10.0,
+            value=a["growth"]["annual_expense_growth"] * 100, step=0.5,
+            help=f"Base: {a['growth']['annual_expense_growth']:.1%}. Inflation/wage pressure.",
+        )
+        alab_fnb_rev = st.slider(
+            "F&B / Merch Revenue ($/yr)",
+            min_value=0, max_value=30_000,
+            value=a["fnb"]["year1_revenue"], step=500,
+            help=f"Base: ${a['fnb']['year1_revenue']:,}. Year 1 food, beverage, merch sales.",
+        )
+
+    with alab_col3:
+        st.markdown("**COGS & Non-Cash**")
+        alab_cogs = st.slider(
+            "F&B COGS (%)",
+            min_value=20.0, max_value=60.0,
+            value=a["fnb"]["cogs_pct"] * 100, step=1.0,
+            help=f"Base: {a['fnb']['cogs_pct']:.0%}. Cost of goods on food/beverage.",
+        )
+        alab_depreciation = st.slider(
+            "Annual Depreciation ($)",
+            min_value=10_000, max_value=40_000,
+            value=a["depreciation"]["annual_depreciation"], step=1_000,
+            help=f"Base: ${a['depreciation']['annual_depreciation']:,}. Non-cash charge for equipment wear.",
+        )
+        alab_merchant = st.slider(
+            "Merchant Processing Fee (%)",
+            min_value=1.0, max_value=5.0,
+            value=a["fees"]["merchant_processing_pct"] * 100, step=0.25,
+            help=f"Base: {a['fees']['merchant_processing_pct']:.0%}. Square/Stripe card fees.",
+        )
+
+    st.divider()
+
+    # ---- Run adjusted model ----
+    # Temporarily override config.ASSUMPTIONS, run the model, restore
+    original_assumptions = copy.deepcopy(config_module.ASSUMPTIONS)
+
+    try:
+        config_module.ASSUMPTIONS["debt"]["loan_amount"] = alab_loan
+        config_module.ASSUMPTIONS["debt"]["interest_rate"] = alab_rate / 100
+        config_module.ASSUMPTIONS["debt"]["annual_principal_payment"] = alab_principal
+        config_module.ASSUMPTIONS["debt"]["owner_equity"] = max(0, (alab_loan / 9))  # ~10% equity ratio
+        config_module.ASSUMPTIONS["growth"]["annual_revenue_growth"] = alab_rev_growth / 100
+        config_module.ASSUMPTIONS["growth"]["annual_expense_growth"] = alab_exp_growth / 100
+        config_module.ASSUMPTIONS["fnb"]["year1_revenue"] = alab_fnb_rev
+        config_module.ASSUMPTIONS["fnb"]["cogs_pct"] = alab_cogs / 100
+        config_module.ASSUMPTIONS["depreciation"]["annual_depreciation"] = alab_depreciation
+        config_module.ASSUMPTIONS["fees"]["merchant_processing_pct"] = alab_merchant / 100
+
+        adj_model = build_full_model(
+            daily_device_hours=daily_hours,
+            price_per_hour=price,
+            forecast_years=forecast_years,
+        )
+    finally:
+        # Always restore original assumptions
+        config_module.ASSUMPTIONS.update(copy.deepcopy(original_assumptions))
+
+    adj_inc = adj_model["income_statement"]
+    adj_cf = adj_model["cash_flow"]
+    adj_ratios = adj_model["ratios"]
+
+    # ---- Side-by-side KPI comparison ----
+    st.markdown("### Impact: Base Case vs Adjusted")
+
+    # Determine which years to show
+    year_labels = [f"Year {i+1}" for i in range(forecast_years)]
+
+    for yr_label in year_labels:
+        st.markdown(f"**{yr_label}**")
+        k1, k2, k3, k4, k5 = st.columns(5)
+
+        base_rev = inc.loc["Total Revenue", yr_label]
+        adj_rev_val = adj_inc.loc["Total Revenue", yr_label]
+        k1.metric(
+            "Total Revenue",
+            f"${adj_rev_val:,.0f}",
+            delta=f"${adj_rev_val - base_rev:+,.0f}" if abs(adj_rev_val - base_rev) > 0.5 else None,
+            delta_color="normal",
+        )
+
+        base_ebitda = inc.loc["EBITDA", yr_label]
+        adj_ebitda_val = adj_inc.loc["EBITDA", yr_label]
+        k2.metric(
+            "EBITDA",
+            f"${adj_ebitda_val:,.0f}",
+            delta=f"${adj_ebitda_val - base_ebitda:+,.0f}" if abs(adj_ebitda_val - base_ebitda) > 0.5 else None,
+            delta_color="normal",
+        )
+
+        base_pretax = inc.loc["Pre-Tax Income", yr_label]
+        adj_pretax_val = adj_inc.loc["Pre-Tax Income", yr_label]
+        k3.metric(
+            "Pre-Tax Income",
+            f"${adj_pretax_val:,.0f}",
+            delta=f"${adj_pretax_val - base_pretax:+,.0f}" if abs(adj_pretax_val - base_pretax) > 0.5 else None,
+            delta_color="normal",
+        )
+
+        base_dscr = ratios.loc["DSCR", yr_label]
+        adj_dscr_val = adj_ratios.loc["DSCR", yr_label]
+        k4.metric(
+            "DSCR",
+            f"{adj_dscr_val:.2f}x",
+            delta=f"{adj_dscr_val - base_dscr:+.2f}x" if abs(adj_dscr_val - base_dscr) > 0.005 else None,
+            delta_color="normal",
+        )
+
+        base_cash = cf.loc["Ending Cash Balance", yr_label]
+        adj_cash_val = adj_cf.loc["Ending Cash Balance", yr_label]
+        k5.metric(
+            "Ending Cash",
+            f"${adj_cash_val:,.0f}",
+            delta=f"${adj_cash_val - base_cash:+,.0f}" if abs(adj_cash_val - base_cash) > 0.5 else None,
+            delta_color="normal",
+        )
+
+    st.divider()
+
+    # ---- Adjusted Income Statement ----
+    st.markdown("### Adjusted Income Statement")
+    display_adj_inc = adj_inc.copy()
+    for col in display_adj_inc.columns:
+        display_adj_inc[col] = display_adj_inc[col].apply(
+            lambda x: f"${x:,.0f}" if isinstance(x, (int, float)) and abs(x) > 1
+            else f"{x:.1%}" if isinstance(x, float) and abs(x) <= 1
+            else "" if pd.isna(x) else str(x)
+        )
+    st.dataframe(display_adj_inc, use_container_width=True, height=600)
+
+    # ---- Assumptions delta table ----
+    st.divider()
+    st.markdown("### Assumptions Comparison")
+    assumptions_compare = [
+        {"Assumption": "SBA Loan Amount", "Base": f"${a['debt']['loan_amount']:,}", "Adjusted": f"${alab_loan:,}",
+         "Change": f"${alab_loan - a['debt']['loan_amount']:+,}"},
+        {"Assumption": "Interest Rate", "Base": f"{a['debt']['interest_rate']:.1%}", "Adjusted": f"{alab_rate/100:.1%}",
+         "Change": f"{(alab_rate/100 - a['debt']['interest_rate'])*100:+.2f}pp"},
+        {"Assumption": "Annual Principal Payment", "Base": f"${a['debt']['annual_principal_payment']:,}", "Adjusted": f"${alab_principal:,}",
+         "Change": f"${alab_principal - a['debt']['annual_principal_payment']:+,}"},
+        {"Assumption": "Revenue Growth", "Base": f"{a['growth']['annual_revenue_growth']:.1%}", "Adjusted": f"{alab_rev_growth/100:.1%}",
+         "Change": f"{(alab_rev_growth/100 - a['growth']['annual_revenue_growth'])*100:+.2f}pp"},
+        {"Assumption": "Expense Growth", "Base": f"{a['growth']['annual_expense_growth']:.1%}", "Adjusted": f"{alab_exp_growth/100:.1%}",
+         "Change": f"{(alab_exp_growth/100 - a['growth']['annual_expense_growth'])*100:+.2f}pp"},
+        {"Assumption": "F&B Revenue (Yr 1)", "Base": f"${a['fnb']['year1_revenue']:,}", "Adjusted": f"${alab_fnb_rev:,}",
+         "Change": f"${alab_fnb_rev - a['fnb']['year1_revenue']:+,}"},
+        {"Assumption": "F&B COGS %", "Base": f"{a['fnb']['cogs_pct']:.0%}", "Adjusted": f"{alab_cogs/100:.0%}",
+         "Change": f"{(alab_cogs/100 - a['fnb']['cogs_pct'])*100:+.1f}pp"},
+        {"Assumption": "Annual Depreciation", "Base": f"${a['depreciation']['annual_depreciation']:,}", "Adjusted": f"${alab_depreciation:,}",
+         "Change": f"${alab_depreciation - a['depreciation']['annual_depreciation']:+,}"},
+        {"Assumption": "Merchant Processing %", "Base": f"{a['fees']['merchant_processing_pct']:.0%}", "Adjusted": f"{alab_merchant/100:.0%}",
+         "Change": f"{(alab_merchant/100 - a['fees']['merchant_processing_pct'])*100:+.1f}pp"},
+    ]
+
+    acomp_df = pd.DataFrame(assumptions_compare)
+
+    def highlight_changed(row):
+        # Check if anything actually changed
+        if row["Base"] != row["Adjusted"]:
+            return ["background-color: #fff3cd"] * len(row)
+        return [""] * len(row)
+
+    styled_acomp = acomp_df.style.apply(highlight_changed, axis=1)
+    st.dataframe(styled_acomp, use_container_width=True, hide_index=True)
+
+    # ---- Interest rate sensitivity chart ----
+    st.divider()
+    st.markdown("### Interest Rate Sensitivity")
+    st.caption(
+        "Shows how Pre-Tax Income changes across different interest rates, "
+        "holding all other assumptions at their current slider values."
+    )
+
+    rate_range = [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0]
+    rate_pretax = []
+
+    for test_rate in rate_range:
+        # Quick manual calculation for Year 1 only
+        test_interest = alab_loan * (test_rate / 100)
+        # Use adjusted model's EBIT (which doesn't depend on interest rate)
+        test_ebit = adj_inc.loc["EBIT (Operating Income)", "Year 1"]
+        test_pretax_val = test_ebit - test_interest
+        rate_pretax.append(test_pretax_val)
+
+    fig_rate, ax_rate = plt.subplots(figsize=(8, 4))
+    bar_colors_rate = ["#59a14f" if v >= 0 else "#e15759" for v in rate_pretax]
+    ax_rate.bar([f"{r:.0f}%" for r in rate_range], rate_pretax, color=bar_colors_rate, width=0.6)
+    ax_rate.axhline(y=0, color="gray", linewidth=0.8, linestyle="--")
+    ax_rate.set_xlabel("Interest Rate")
+    ax_rate.set_ylabel("Year 1 Pre-Tax Income ($)")
+    ax_rate.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    ax_rate.set_title("How Interest Rate Affects Year 1 Pre-Tax Income")
+
+    # Mark current rate
+    current_idx = None
+    for i, r in enumerate(rate_range):
+        if abs(r - alab_rate) < 0.01:
+            current_idx = i
+            break
+    if current_idx is not None:
+        ax_rate.get_children()[current_idx].set_edgecolor("black")
+        ax_rate.get_children()[current_idx].set_linewidth(2)
+
+    plt.tight_layout()
+    st.pyplot(fig_rate)
+    plt.close(fig_rate)
+
+    # ---- Growth rate impact over forecast period ----
+    st.markdown("### Revenue vs Expense Growth — Margin Trajectory")
+    st.caption(
+        "Shows how the spread between revenue growth and expense growth "
+        "compounds over the forecast period. Margin expands when rev growth > exp growth."
+    )
+
+    margin_data = []
+    for yr_label in year_labels:
+        base_margin = inc.loc["EBITDA", yr_label] / inc.loc["Total Revenue", yr_label] if inc.loc["Total Revenue", yr_label] else 0
+        adj_margin = adj_inc.loc["EBITDA", yr_label] / adj_inc.loc["Total Revenue", yr_label] if adj_inc.loc["Total Revenue", yr_label] else 0
+        margin_data.append({
+            "Year": yr_label,
+            "Base EBITDA Margin": base_margin,
+            "Adjusted EBITDA Margin": adj_margin,
+        })
+
+    margin_df = pd.DataFrame(margin_data)
+
+    fig_margin, ax_margin = plt.subplots(figsize=(8, 4))
+    x_pos = range(len(year_labels))
+    width = 0.35
+    ax_margin.bar([p - width/2 for p in x_pos], margin_df["Base EBITDA Margin"],
+                  width=width, label="Base Case", color="#4e79a7", alpha=0.8)
+    ax_margin.bar([p + width/2 for p in x_pos], margin_df["Adjusted EBITDA Margin"],
+                  width=width, label="Adjusted", color="#59a14f", alpha=0.8)
+    ax_margin.set_xticks(list(x_pos))
+    ax_margin.set_xticklabels(year_labels)
+    ax_margin.set_ylabel("EBITDA Margin")
+    ax_margin.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"{x:.0%}"))
+    ax_margin.legend()
+    ax_margin.set_title("EBITDA Margin: Base vs Adjusted Over Time")
+    ax_margin.axhline(y=0, color="gray", linewidth=0.8, linestyle="--")
+    plt.tight_layout()
+    st.pyplot(fig_margin)
+    plt.close(fig_margin)
 
 # =============================================================================
 # FOOTER
