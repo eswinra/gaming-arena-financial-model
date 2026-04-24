@@ -214,12 +214,19 @@ with tab2:
     with c1:
         st.subheader("Cash Flow Statement")
         display_cf = cf.copy()
+
+        # Mark section headers so they look like titles, not missing data
+        section_headers = ["Cash Flow from Operations", "Cash Flow from Financing"]
         for col in display_cf.columns:
             display_cf[col] = display_cf[col].apply(
                 lambda x: "" if pd.isna(x)
                 else f"${x:,.0f}" if isinstance(x, (int, float))
                 else str(x)
             )
+        for header in section_headers:
+            if header in display_cf.index:
+                for col in display_cf.columns:
+                    display_cf.loc[header, col] = "----------"
         st.dataframe(display_cf, use_container_width=True)
 
     with c2:
