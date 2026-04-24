@@ -261,6 +261,10 @@ def run_monte_carlo(
 
     # Run model for each simulation
     # PYTHON CONCEPT: List comprehension — a concise way to build a list
+    a = ASSUMPTIONS
+    annual_ds = (a["debt"]["annual_principal_payment"]
+                 + a["debt"]["loan_amount"] * a["debt"]["interest_rate"])
+
     results = []
     for i in range(n_simulations):
         inc = build_income_statement(
@@ -269,14 +273,18 @@ def run_monte_carlo(
             forecast_years=1,
         )
 
+        ebitda_val = inc.loc["EBITDA", "Year 1"]
+        dscr_val = ebitda_val / annual_ds if annual_ds > 0 else 0
+
         results.append({
             "sim_id": i + 1,
             "daily_hours": int(hours_samples[i]),
             "price_per_hour": float(price_samples[i]),
             "utilization": calc_utilization(int(hours_samples[i])),
             "total_revenue": inc.loc["Total Revenue", "Year 1"],
-            "ebitda": inc.loc["EBITDA", "Year 1"],
+            "ebitda": ebitda_val,
             "pretax_income": inc.loc["Pre-Tax Income", "Year 1"],
+            "dscr": dscr_val,
         })
 
     return pd.DataFrame(results)
@@ -318,7 +326,13 @@ def summarize_monte_carlo(sim_df: pd.DataFrame) -> dict:
             "p95": sim_df["pretax_income"].quantile(0.95),
         },
         "probability_of_loss": (sim_df["pretax_income"] < 0).mean(),
-        "probability_dscr_below_125": None,  # Would need DSCR in sim; placeholder
+        "probability_dscr_below_125": (sim_df["dscr"] < 1.25).mean() if "dscr" in sim_df.columns else None,
+        "dscr": {
+            "mean": sim_df["dscr"].mean() if "dscr" in sim_df.columns else None,
+            "p5": sim_df["dscr"].quantile(0.05) if "dscr" in sim_df.columns else None,
+            "median": sim_df["dscr"].median() if "dscr" in sim_df.columns else None,
+            "p95": sim_df["dscr"].quantile(0.95) if "dscr" in sim_df.columns else None,
+        },
     }
 
 

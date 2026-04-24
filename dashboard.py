@@ -53,7 +53,16 @@ from variance_analysis import (
     generate_variance_commentary,
     build_kpi_scorecard,
     build_monthly_actuals,
+    VARIANCE_SCENARIOS,
 )
+from rolling_forecast import (
+    build_rolling_forecast,
+    summarize_latest_estimate,
+    compute_forecast_accuracy,
+    summarize_forecast_accuracy,
+)
+from unit_economics import compute_unit_economics, build_driver_sensitivity
+from executive_summary import generate_executive_summary
 
 # =============================================================================
 # PAGE CONFIGURATION
@@ -116,6 +125,20 @@ var_scenario = st.sidebar.selectbox(
     options=["Worst Case", "Base Case", "Best Case"],
     index=1,  # default = Base Case
     help="Select a scenario to compare against budget. Each has specific, defensible assumptions.",
+)
+
+st.sidebar.divider()
+st.sidebar.subheader("Rolling Forecast")
+close_through = st.sidebar.slider(
+    "Months Closed",
+    min_value=1, max_value=12, value=6, step=1,
+    help="How many months of actuals are in. Remaining months are reforecast.",
+)
+reforecast_method = st.sidebar.selectbox(
+    "Reforecast Method",
+    options=["run_rate", "budget", "trending"],
+    index=0,
+    help="run_rate: YTD average. budget: original plan. trending: apply YTD variance ratio.",
 )
 
 # =============================================================================
@@ -184,7 +207,7 @@ st.divider()
 # TABBED SECTIONS
 # =============================================================================
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
     "Income Statement",
     "Cash Flow & Balance Sheet",
     "Scenarios",
@@ -195,6 +218,9 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "KPI Scorecard",
     "Cost Drivers",
     "Assumptions Lab",
+    "Rolling Forecast",
+    "Unit Economics",
+    "Executive Summary",
 ])
 
 # --- TAB 1: Income Statement ---
@@ -365,11 +391,15 @@ with tab5:
     summary = summarize_monte_carlo(sim_df)
 
     # Summary metrics
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5, m6 = st.columns(6)
     m1.metric("Expected EBITDA", f"${summary['ebitda']['mean']:,.0f}")
     m2.metric("Probability of Loss", f"{summary['probability_of_loss']:.1%}")
     m3.metric("EBITDA 5th Pctl", f"${summary['ebitda']['p5']:,.0f}")
     m4.metric("EBITDA 95th Pctl", f"${summary['ebitda']['p95']:,.0f}")
+    if summary.get("dscr") and summary["dscr"].get("mean") is not None:
+        m5.metric("Expected DSCR", f"{summary['dscr']['mean']:.2f}x")
+    if summary.get("probability_dscr_below_125") is not None:
+        m6.metric("P(DSCR < 1.25x)", f"{summary['probability_dscr_below_125']:.1%}")
 
     # Distribution chart (matplotlib histogram)
     st.subheader("EBITDA Distribution")
@@ -442,8 +472,6 @@ with tab6:
 with tab7:
     st.subheader("Budget vs Actual Variance Analysis")
 
-    # Import scenario descriptions for display
-    from variance_analysis import VARIANCE_SCENARIOS
     sc_info = VARIANCE_SCENARIOS[var_scenario]
     st.caption(f"**{sc_info['label']}**: {sc_info['description']}")
 
@@ -1214,6 +1242,275 @@ with tab10:
     plt.tight_layout()
     st.pyplot(fig_margin)
     plt.close(fig_margin)
+
+# --- TAB 11: Rolling Forecast ---
+with tab11:
+    st.subheader("Rolling Forecast & Latest Estimate")
+    st.caption(
+        f"Actuals through month {close_through} | "
+        f"Reforecast method: {reforecast_method} | Scenario: {var_scenario}"
+    )
+
+    rf = build_rolling_forecast(
+        daily_device_hours=daily_hours,
+        price_per_hour=price,
+        scenario=var_scenario,
+        close_through_month=close_through,
+        reforecast_method=reforecast_method,
+    )
+
+    # Latest Estimate summary
+    le_summary = summarize_latest_estimate(rf)
+    st.markdown("**Full-Year Latest Estimate**")
+
+    le_cols = st.columns(4)
+    for i, (metric, row) in enumerate(le_summary.iterrows()):
+        with le_cols[i % 4]:
+            var_pct = row["Variance (%)"]
+            delta_str = f"{var_pct:+.1%}" if abs(var_pct) > 0.001 else None
+            st.metric(
+                metric,
+                f"${row['Latest Estimate']:,.0f}",
+                delta=delta_str,
+                help=f"Budget: ${row['Full-Year Budget']:,.0f}",
+            )
+
+    st.divider()
+
+    # Monthly rolling forecast chart — Revenue
+    st.markdown("**Monthly Revenue: Actual vs Budget vs Forecast**")
+    rev_rf = rf[rf["Metric"] == "Revenue"].copy()
+    months_rf = rev_rf["Month"].tolist()
+
+    fig_rf, ax_rf = plt.subplots(figsize=(10, 4))
+    actual_mask = rev_rf["Source"] == "Actual"
+    forecast_mask = rev_rf["Source"] == "Forecast"
+
+    ax_rf.bar(
+        [m for m, a in zip(months_rf, actual_mask) if a],
+        rev_rf.loc[actual_mask, "Actual/Forecast"].tolist(),
+        color="#4e79a7", label="Actual", width=0.4, align="edge",
+    )
+    ax_rf.bar(
+        [m for m, f in zip(months_rf, forecast_mask) if f],
+        rev_rf.loc[forecast_mask, "Actual/Forecast"].tolist(),
+        color="#76b7b2", label="Forecast", width=0.4, align="edge",
+    )
+    ax_rf.plot(months_rf, rev_rf["Budget"].tolist(), linestyle="--", color="#888780",
+               marker="o", markersize=4, label="Budget", linewidth=1.5)
+    ax_rf.set_ylabel("Revenue ($)")
+    ax_rf.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    ax_rf.legend(fontsize=8)
+    ax_rf.set_title("Rolling Forecast — Revenue")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    st.pyplot(fig_rf)
+    plt.close(fig_rf)
+
+    # Forecast detail table
+    st.divider()
+    st.markdown("**Rolling Forecast Detail**")
+    display_rf = rf.copy()
+    display_rf["Budget"] = display_rf["Budget"].apply(lambda x: f"${x:,.0f}")
+    display_rf["Actual/Forecast"] = display_rf["Actual/Forecast"].apply(lambda x: f"${x:,.0f}")
+    display_rf["Variance ($)"] = display_rf["Variance ($)"].apply(lambda x: f"${x:+,.0f}")
+    display_rf["Variance (%)"] = display_rf["Variance (%)"].apply(lambda x: f"{x:+.1%}")
+    st.dataframe(display_rf, use_container_width=True, height=500)
+
+    # Forecast accuracy
+    st.divider()
+    st.subheader("Forecast Accuracy Analysis")
+    st.caption("How well did the budget predict actual results?")
+
+    acc = compute_forecast_accuracy(
+        daily_device_hours=daily_hours,
+        price_per_hour=price,
+        scenario=var_scenario,
+    )
+    acc_summary = summarize_forecast_accuracy(acc)
+
+    acc_cols = st.columns(3)
+    for i, (metric, row) in enumerate(acc_summary.iterrows()):
+        with acc_cols[i % 3]:
+            grade_colors = {
+                "Excellent": "#d4edda", "Good": "#d4edda",
+                "Needs Work": "#fff3cd", "Poor": "#f8d7da",
+            }
+            bg = grade_colors.get(row["Grade"], "#ffffff")
+            st.markdown(
+                f"<div style='background:{bg};padding:12px;border-radius:8px;margin-bottom:8px;'>"
+                f"<div style='font-weight:700;'>{metric}</div>"
+                f"<div>MAPE: {row['MAPE']:.1%} — <b>{row['Grade']}</b></div>"
+                f"<div>Bias: ${row['Avg Bias ($)']:+,.0f} ({row['Bias Direction']})</div>"
+                f"<div>Hit Rate (±5%): {row['Hit Rate (±5%)']:.0%}</div>"
+                f"<div style='font-size:11px;color:#666;'>Worst: {row['Worst Month']} ({row['Worst Miss']:.1%})</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+
+# --- TAB 12: Unit Economics ---
+with tab12:
+    st.subheader("Unit Economics & Driver-Based Metrics")
+    st.caption(
+        f"Per-unit economics at {daily_hours} daily device-hours, "
+        f"${price:.2f}/hr, {calc_utilization(daily_hours):.1%} utilization"
+    )
+
+    metrics = compute_unit_economics(
+        daily_device_hours=daily_hours,
+        price_per_hour=price,
+    )
+
+    for group_name, group_metrics in metrics.items():
+        st.markdown(f"### {group_name}")
+        rows_ue = []
+        for m in group_metrics:
+            if m["Unit"] == "$":
+                val_fmt = f"${m['Value']:,.2f}"
+            elif m["Unit"] == "%":
+                val_fmt = f"{m['Value']:.1%}"
+            elif m["Unit"] == "months":
+                if m["Value"] == float('inf'):
+                    val_fmt = "N/A (negative EBITDA)"
+                else:
+                    val_fmt = f"{m['Value']:.1f} months"
+            elif m["Unit"] == "hrs":
+                val_fmt = f"{m['Value']:.0f} hrs"
+            else:
+                val_fmt = f"{m['Value']:.2f}"
+            rows_ue.append({
+                "Metric": m["Metric"],
+                "Value": val_fmt,
+                "Formula": m["Formula"],
+                "Explanation": m["Explanation"],
+            })
+        st.dataframe(pd.DataFrame(rows_ue), use_container_width=True, hide_index=True)
+
+    # Driver sensitivity
+    st.divider()
+    st.subheader("Driver Sensitivity — What Moves EBITDA Most?")
+    st.caption("Each driver is tested at ±10% to show relative impact on EBITDA")
+
+    driver_sens = build_driver_sensitivity(
+        daily_device_hours=daily_hours,
+        price_per_hour=price,
+    )
+
+    fig_drv, ax_drv = plt.subplots(figsize=(9, 4.5))
+    colors_drv = ["#59a14f" if v >= 0 else "#e15759" for v in driver_sens["EBITDA Impact ($)"]]
+    ax_drv.barh(driver_sens.index.tolist(), driver_sens["EBITDA Impact ($)"].tolist(), color=colors_drv)
+    ax_drv.set_xlabel("EBITDA Impact ($)")
+    ax_drv.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:+,.0f}"))
+    ax_drv.axvline(x=0, color="gray", linewidth=0.8)
+    ax_drv.set_title("EBITDA Impact of ±10% Change in Each Driver")
+    plt.tight_layout()
+    st.pyplot(fig_drv)
+    plt.close(fig_drv)
+
+    # Table
+    display_drv = driver_sens.copy()
+    display_drv["Base EBITDA"] = display_drv["Base EBITDA"].apply(lambda x: f"${x:,.0f}")
+    display_drv["New EBITDA"] = display_drv["New EBITDA"].apply(lambda x: f"${x:,.0f}")
+    display_drv["EBITDA Impact ($)"] = display_drv["EBITDA Impact ($)"].apply(lambda x: f"${x:+,.0f}")
+    display_drv["EBITDA Impact (%)"] = display_drv["EBITDA Impact (%)"].apply(lambda x: f"{x:+.1%}")
+    st.dataframe(display_drv, use_container_width=True)
+
+
+# --- TAB 13: Executive Summary ---
+with tab13:
+    st.subheader("Executive Summary — Board-Ready Briefing")
+
+    summary = generate_executive_summary(
+        daily_device_hours=daily_hours,
+        price_per_hour=price,
+        forecast_years=forecast_years,
+        scenario=var_scenario,
+    )
+
+    # Overall status badge
+    status_colors = {"GREEN": "#d4edda", "AMBER": "#fff3cd", "RED": "#f8d7da"}
+    status_text_colors = {"GREEN": "#155724", "AMBER": "#856404", "RED": "#721c24"}
+    overall = summary["overall_status"]
+
+    st.markdown(
+        f"<div style='background:{status_colors[overall]};padding:16px;border-radius:8px;"
+        f"border-left:6px solid {status_text_colors[overall]};margin-bottom:16px;'>"
+        f"<div style='font-size:11px;font-weight:600;color:{status_text_colors[overall]};'>"
+        f"OVERALL STATUS: {overall}</div>"
+        f"<div style='font-size:16px;font-weight:700;color:{status_text_colors[overall]};'>"
+        f"{summary['headline']}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Key metrics row
+    km = summary["key_metrics"]
+    km_cols = st.columns(5)
+    km_cols[0].metric("Total Revenue", f"${km['total_revenue']:,.0f}")
+    km_cols[1].metric("EBITDA", f"${km['ebitda']:,.0f}")
+    km_cols[2].metric("EBITDA Margin", f"{km['ebitda_margin']:.1%}")
+    km_cols[3].metric("DSCR", f"{km['dscr']:.2f}x")
+    km_cols[4].metric("Cash Runway", f"{km['cash_runway_months']:.1f} mo")
+
+    st.divider()
+
+    # Section cards
+    st.markdown("### Performance Sections")
+    for section in summary["sections"]:
+        s = section["status"]
+        st.markdown(
+            f"<div style='background:{status_colors[s]};padding:14px;border-radius:8px;"
+            f"border-left:4px solid {status_text_colors[s]};margin-bottom:10px;'>"
+            f"<div style='font-weight:700;color:{status_text_colors[s]};'>"
+            f"[{s}] {section['title']}</div>"
+            f"<div style='color:#333;margin-top:4px;'>{section['narrative']}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+    st.divider()
+
+    # Risks
+    st.markdown("### Risk Register")
+    if summary["risks"]:
+        risk_rows = []
+        for r in summary["risks"]:
+            risk_rows.append({
+                "Severity": r["severity"],
+                "Risk": r["risk"],
+                "Detail": r["detail"],
+            })
+        risk_df = pd.DataFrame(risk_rows)
+
+        def color_severity(val):
+            if val == "HIGH":
+                return "background-color: #f8d7da; color: #721c24; font-weight: bold"
+            elif val == "MEDIUM":
+                return "background-color: #fff3cd; color: #856404; font-weight: bold"
+            else:
+                return "background-color: #d4edda; color: #155724"
+
+        styled_risk = risk_df.style.map(color_severity, subset=["Severity"])
+        st.dataframe(styled_risk, use_container_width=True, hide_index=True)
+    else:
+        st.success("No significant risks identified at current assumptions.")
+
+    # Recommendations
+    st.markdown("### Recommendations")
+    for i, rec in enumerate(summary["recommendations"], 1):
+        st.markdown(f"**{i}.** {rec}")
+
+    # Metadata
+    st.divider()
+    st.caption(
+        f"Scenario: {summary['metadata']['scenario']} | "
+        f"Hours: {summary['metadata']['daily_hours']}/day | "
+        f"Price: ${summary['metadata']['price_per_hour']:.2f}/hr | "
+        f"Utilization: {summary['metadata']['utilization']:.1%} | "
+        f"Forecast: {summary['metadata']['forecast_years']} years"
+    )
+
 
 # =============================================================================
 # FOOTER

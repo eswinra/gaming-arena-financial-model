@@ -50,7 +50,8 @@ Examples:
 
     parser.add_argument(
         "--mode",
-        choices=["model", "scenarios", "sensitivity", "excel", "montecarlo", "all"],
+        choices=["model", "scenarios", "sensitivity", "excel", "montecarlo",
+                 "variance", "forecast", "uniteconomics", "executive", "all"],
         default="model",
         help="What to run (default: model)",
     )
@@ -179,8 +180,119 @@ Examples:
         print(f"  Expected EBITDA:        ${summary['ebitda']['mean']:>12,.0f}")
         print(f"  Expected Pre-Tax:       ${summary['pretax_income']['mean']:>12,.0f}")
         print(f"  Probability of Loss:    {summary['probability_of_loss']:>12.1%}")
+        if summary.get("probability_dscr_below_125") is not None:
+            print(f"  P(DSCR < 1.25x):       {summary['probability_dscr_below_125']:>12.1%}")
+        if summary.get("dscr") and summary["dscr"].get("mean") is not None:
+            print(f"  Expected DSCR:          {summary['dscr']['mean']:>12.2f}x")
         print(f"  EBITDA Range (5-95%):   ${summary['ebitda']['p5']:>10,.0f} to "
               f"${summary['ebitda']['p95']:>,.0f}")
+
+    # =========================================================================
+    # MODE: VARIANCE
+    # =========================================================================
+    if args.mode in ("variance", "all"):
+        print("\n\n--- BUDGET VS ACTUAL VARIANCE ---")
+        print("-" * 70)
+        from variance_analysis import (
+            build_budget, build_actuals, compute_variance,
+            generate_variance_commentary, build_kpi_scorecard,
+        )
+        budget = build_budget(daily_device_hours=hours, price_per_hour=price)
+        for scenario_name in ["Worst Case", "Base Case", "Best Case"]:
+            actuals_data = build_actuals(
+                daily_device_hours=hours, price_per_hour=price, scenario=scenario_name,
+            )
+            variance = compute_variance(budget, actuals_data)
+            print(f"\n  [{scenario_name}] Pre-Tax Variance: "
+                  f"${variance.loc['Pre-Tax Income', 'Variance ($)']:+,.0f} "
+                  f"({variance.loc['Pre-Tax Income', 'Variance (%)']:+.1%})")
+            commentary = generate_variance_commentary(variance, top_n=3)
+            for c in commentary:
+                print(f"    - {c}")
+
+    # =========================================================================
+    # MODE: ROLLING FORECAST
+    # =========================================================================
+    if args.mode in ("forecast", "all"):
+        print("\n\n--- ROLLING FORECAST (closed through month 6) ---")
+        print("-" * 70)
+        from rolling_forecast import (
+            build_rolling_forecast, summarize_latest_estimate,
+            compute_forecast_accuracy, summarize_forecast_accuracy,
+        )
+        rf = build_rolling_forecast(
+            daily_device_hours=hours, price_per_hour=price,
+            scenario="Base Case", close_through_month=6,
+        )
+        le = summarize_latest_estimate(rf)
+        for metric, row in le.iterrows():
+            print(f"  {metric:20s}  Budget: ${row['Full-Year Budget']:>10,.0f}  "
+                  f"LE: ${row['Latest Estimate']:>10,.0f}  "
+                  f"Var: ${row['Variance ($)']:>+10,.0f} ({row['Variance (%)']:>+.1%})")
+
+        acc = compute_forecast_accuracy(
+            daily_device_hours=hours, price_per_hour=price, scenario="Base Case",
+        )
+        acc_summary = summarize_forecast_accuracy(acc)
+        print("\n  Forecast Accuracy:")
+        for metric, row in acc_summary.iterrows():
+            print(f"    {metric:12s}  MAPE: {row['MAPE']:.1%} [{row['Grade']}]  "
+                  f"Bias: ${row['Avg Bias ($)']:>+8,.0f}")
+
+    # =========================================================================
+    # MODE: UNIT ECONOMICS
+    # =========================================================================
+    if args.mode in ("uniteconomics", "all"):
+        print("\n\n--- UNIT ECONOMICS ---")
+        print("-" * 70)
+        from unit_economics import compute_unit_economics, build_driver_sensitivity
+        ue = compute_unit_economics(daily_device_hours=hours, price_per_hour=price)
+        for group, items in ue.items():
+            print(f"\n  {group}:")
+            for m in items:
+                if m["Unit"] == "$":
+                    print(f"    {m['Metric']:40s}  ${m['Value']:>10,.2f}")
+                elif m["Unit"] == "%":
+                    print(f"    {m['Metric']:40s}  {m['Value']:>10.1%}")
+                else:
+                    print(f"    {m['Metric']:40s}  {m['Value']:>10.1f} {m['Unit']}")
+
+        print("\n  Driver Sensitivity (±10%):")
+        sens = build_driver_sensitivity(daily_device_hours=hours, price_per_hour=price)
+        for driver, row in sens.iterrows():
+            print(f"    {driver:30s}  EBITDA: ${row['New EBITDA']:>10,.0f}  "
+                  f"Impact: ${row['EBITDA Impact ($)']:>+8,.0f} ({row['EBITDA Impact (%)']:>+.1%})")
+
+    # =========================================================================
+    # MODE: EXECUTIVE SUMMARY
+    # =========================================================================
+    if args.mode in ("executive", "all"):
+        print("\n\n--- EXECUTIVE SUMMARY ---")
+        print("-" * 70)
+        from executive_summary import generate_executive_summary
+        exec_summary = generate_executive_summary(
+            daily_device_hours=hours, price_per_hour=price,
+            forecast_years=years,
+        )
+        print(f"\n  [{exec_summary['overall_status']}] {exec_summary['headline']}")
+        for section in exec_summary["sections"]:
+            print(f"\n  [{section['status']:>5s}] {section['title']}")
+            words = section["narrative"].split()
+            line = "    "
+            for word in words:
+                if len(line) + len(word) > 78:
+                    print(line)
+                    line = "    "
+                line += word + " "
+            if line.strip():
+                print(line)
+        if exec_summary["risks"]:
+            print("\n  RISKS:")
+            for r in exec_summary["risks"]:
+                print(f"    [{r['severity']:>6s}] {r['risk']}: {r['detail']}")
+        print("\n  RECOMMENDATIONS:")
+        for i, rec in enumerate(exec_summary["recommendations"], 1):
+            print(f"    {i}. {rec}")
 
     # =========================================================================
     # MODE: EXCEL
