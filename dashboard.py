@@ -45,6 +45,15 @@ from scenarios import (
     run_monte_carlo,
     summarize_monte_carlo,
 )
+from variance_analysis import (
+    build_budget,
+    build_actuals,
+    compute_variance,
+    build_variance_waterfall,
+    generate_variance_commentary,
+    build_kpi_scorecard,
+    build_monthly_actuals,
+)
 
 # =============================================================================
 # PAGE CONFIGURATION
@@ -98,6 +107,14 @@ st.sidebar.subheader("Monte Carlo Settings")
 mc_sims = st.sidebar.number_input(
     "Simulations",
     min_value=100, max_value=5000, value=1000, step=100,
+)
+
+st.sidebar.divider()
+st.sidebar.subheader("Variance Analysis")
+var_seed = st.sidebar.number_input(
+    "Actuals Seed",
+    min_value=1, max_value=999, value=42, step=1,
+    help="Change to simulate different actual outcomes. Same seed = same actuals.",
 )
 
 # =============================================================================
@@ -166,13 +183,15 @@ st.divider()
 # TABBED SECTIONS
 # =============================================================================
 
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "Income Statement",
     "Cash Flow & Balance Sheet",
     "Scenarios",
     "Sensitivity",
     "Monte Carlo",
     "Breakeven",
+    "Variance Analysis",
+    "KPI Scorecard",
 ])
 
 # --- TAB 1: Income Statement ---
@@ -416,6 +435,221 @@ with tab6:
         })
     st.dataframe(pd.DataFrame(be_table), use_container_width=True)
 
+# --- TAB 7: Variance Analysis ---
+with tab7:
+    st.subheader("Budget vs Actual Variance Analysis")
+    st.caption("Simulated actuals with realistic variance from budget assumptions")
+
+    budget = build_budget(daily_device_hours=daily_hours, price_per_hour=price)
+    actuals_data = build_actuals(
+        daily_device_hours=daily_hours, price_per_hour=price, seed=var_seed,
+    )
+    variance = compute_variance(budget, actuals_data)
+
+    # Variance table with color coding
+    st.markdown("**Annual Variance Report**")
+
+    def color_variance_row(row):
+        if row["Direction"] == "Favorable":
+            return ["background-color: #d4edda"] * len(row)
+        elif row["Direction"] == "Unfavorable" and row["Material"]:
+            return ["background-color: #f8d7da"] * len(row)
+        elif row["Direction"] == "Unfavorable":
+            return ["background-color: #fff3cd"] * len(row)
+        return [""] * len(row)
+
+    display_var = variance[["Budget", "Actual", "Variance ($)", "Variance (%)", "Direction", "Material"]].copy()
+    styled_var = display_var.style.apply(color_variance_row, axis=1).format({
+        "Budget": "${:,.0f}",
+        "Actual": "${:,.0f}",
+        "Variance ($)": "${:+,.0f}",
+        "Variance (%)": "{:+.1%}",
+    })
+    st.dataframe(styled_var, use_container_width=True, height=600)
+
+    # Waterfall chart
+    st.subheader("Variance Waterfall")
+    st.caption("What drove the difference between budgeted and actual Pre-Tax Income?")
+    waterfall = build_variance_waterfall(variance)
+
+    if not waterfall.empty:
+        fig_wf, ax_wf = plt.subplots(figsize=(10, 5))
+
+        drivers = waterfall["Driver"].tolist()
+        impacts = waterfall["Impact ($)"].tolist()
+        colors = ["#59a14f" if v >= 0 else "#e15759" for v in impacts]
+
+        # Build cumulative bars for waterfall effect
+        budget_pretax = variance.loc["Pre-Tax Income", "Budget"]
+        bottoms = []
+        running = budget_pretax
+        for impact in impacts:
+            if impact >= 0:
+                bottoms.append(running)
+            else:
+                bottoms.append(running + impact)
+            running += impact
+
+        ax_wf.bar(drivers, [abs(v) for v in impacts], bottom=bottoms, color=colors, width=0.6)
+        ax_wf.axhline(y=budget_pretax, color="#4e79a7", linewidth=1, linestyle="--",
+                       label=f"Budget: ${budget_pretax:,.0f}")
+        ax_wf.axhline(y=running, color="#e15759", linewidth=1, linestyle="--",
+                       label=f"Actual: ${running:,.0f}")
+        ax_wf.set_ylabel("Pre-Tax Income ($)")
+        ax_wf.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+        ax_wf.legend(loc="upper right")
+        ax_wf.set_title("Pre-Tax Income: Budget to Actual Bridge")
+        plt.xticks(rotation=30, ha="right", fontsize=9)
+        plt.tight_layout()
+        st.pyplot(fig_wf)
+        plt.close(fig_wf)
+
+    # Auto-generated commentary
+    st.subheader("Variance Commentary")
+    commentary = generate_variance_commentary(variance)
+    for i, comment in enumerate(commentary, 1):
+        st.markdown(f"**{i}.** {comment}")
+
+    # Monthly trend
+    st.subheader("Monthly Trend Analysis")
+    monthly = build_monthly_actuals(
+        daily_device_hours=daily_hours, price_per_hour=price, seed=var_seed,
+    )
+
+    fig_trend, (ax_rev_t, ax_eb_t) = plt.subplots(1, 2, figsize=(12, 4))
+
+    months = list(monthly.index)
+    ax_rev_t.plot(months, monthly["Actual Revenue"], marker="o", label="Actual", color="#4e79a7")
+    ax_rev_t.plot(months, monthly["Budget Revenue"], linestyle="--", label="Budget", color="#888780")
+    ax_rev_t.set_title("Monthly Revenue: Actual vs Budget")
+    ax_rev_t.set_ylabel("Revenue ($)")
+    ax_rev_t.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    ax_rev_t.legend(fontsize=8)
+    ax_rev_t.tick_params(axis="x", rotation=45)
+
+    ax_eb_t.bar(months, monthly["EBITDA Variance ($)"],
+                color=["#59a14f" if v >= 0 else "#e15759" for v in monthly["EBITDA Variance ($)"]])
+    ax_eb_t.set_title("Monthly EBITDA Variance ($)")
+    ax_eb_t.set_ylabel("Variance ($)")
+    ax_eb_t.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    ax_eb_t.axhline(y=0, color="gray", linewidth=0.8)
+    ax_eb_t.tick_params(axis="x", rotation=45)
+
+    plt.tight_layout()
+    st.pyplot(fig_trend)
+    plt.close(fig_trend)
+
+# --- TAB 8: KPI Scorecard ---
+with tab8:
+    st.subheader("KPI Scorecard")
+    st.caption("Red / Amber / Green status against annual targets")
+
+    budget_kpi = build_budget(daily_device_hours=daily_hours, price_per_hour=price)
+    actuals_kpi = build_actuals(
+        daily_device_hours=daily_hours, price_per_hour=price, seed=var_seed,
+    )
+    scorecard = build_kpi_scorecard(budget_kpi, actuals_kpi)
+
+    # RAG color mapping
+    rag_colors = {"GREEN": "#d4edda", "AMBER": "#fff3cd", "RED": "#f8d7da"}
+    rag_text = {"GREEN": "#155724", "AMBER": "#856404", "RED": "#721c24"}
+
+    # Display as styled metric cards
+    cols_per_row = 4
+    for i in range(0, len(scorecard), cols_per_row):
+        cols = st.columns(cols_per_row)
+        for j, col in enumerate(cols):
+            idx = i + j
+            if idx >= len(scorecard):
+                break
+            row = scorecard.iloc[idx]
+            rag = row["RAG"]
+
+            # Format values
+            if row["Unit"] == "$":
+                target_fmt = f"${row['Target']:,.0f}"
+                actual_fmt = f"${row['Actual']:,.0f}"
+            elif row["Unit"] == "%":
+                target_fmt = f"{row['Target']:.1%}"
+                actual_fmt = f"{row['Actual']:.1%}"
+            else:
+                target_fmt = f"{row['Target']:.2f}x"
+                actual_fmt = f"{row['Actual']:.2f}x"
+
+            var_fmt = f"{row['Variance (%)']:+.1%}"
+
+            with col:
+                st.markdown(
+                    f"<div style='background:{rag_colors[rag]};padding:16px;border-radius:8px;"
+                    f"border-left:4px solid {rag_text[rag]};margin-bottom:8px;'>"
+                    f"<div style='font-size:12px;color:{rag_text[rag]};font-weight:600;'>{row['KPI']}</div>"
+                    f"<div style='font-size:24px;font-weight:700;color:{rag_text[rag]};'>{actual_fmt}</div>"
+                    f"<div style='font-size:12px;color:{rag_text[rag]};'>Target: {target_fmt}  |  {var_fmt}</div>"
+                    f"<div style='font-size:11px;font-weight:600;color:{rag_text[rag]};margin-top:4px;'>{rag}</div>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+    st.divider()
+
+    # Scorecard detail table
+    st.subheader("Scorecard Detail")
+    def color_rag(val):
+        if val == "GREEN":
+            return "background-color: #d4edda; color: #155724; font-weight: bold"
+        elif val == "AMBER":
+            return "background-color: #fff3cd; color: #856404; font-weight: bold"
+        elif val == "RED":
+            return "background-color: #f8d7da; color: #721c24; font-weight: bold"
+        return ""
+
+    display_sc = scorecard.copy()
+    # Format for display
+    for idx_sc in range(len(display_sc)):
+        unit = display_sc.iloc[idx_sc]["Unit"]
+        if unit == "$":
+            display_sc.iloc[idx_sc, display_sc.columns.get_loc("Target")] = f"${scorecard.iloc[idx_sc]['Target']:,.0f}"
+            display_sc.iloc[idx_sc, display_sc.columns.get_loc("Actual")] = f"${scorecard.iloc[idx_sc]['Actual']:,.0f}"
+        elif unit == "%":
+            display_sc.iloc[idx_sc, display_sc.columns.get_loc("Target")] = f"{scorecard.iloc[idx_sc]['Target']:.1%}"
+            display_sc.iloc[idx_sc, display_sc.columns.get_loc("Actual")] = f"{scorecard.iloc[idx_sc]['Actual']:.1%}"
+        else:
+            display_sc.iloc[idx_sc, display_sc.columns.get_loc("Target")] = f"{scorecard.iloc[idx_sc]['Target']:.2f}x"
+            display_sc.iloc[idx_sc, display_sc.columns.get_loc("Actual")] = f"{scorecard.iloc[idx_sc]['Actual']:.2f}x"
+        display_sc.iloc[idx_sc, display_sc.columns.get_loc("Variance (%)")] = f"{scorecard.iloc[idx_sc]['Variance (%)']:+.1%}"
+
+    display_sc = display_sc[["KPI", "Target", "Actual", "Variance (%)", "RAG"]]
+    styled_sc = display_sc.style.map(color_rag, subset=["RAG"])
+    st.dataframe(styled_sc, use_container_width=True, hide_index=True)
+
+    # YTD trend chart
+    st.subheader("YTD Revenue Tracking")
+    monthly_kpi = build_monthly_actuals(
+        daily_device_hours=daily_hours, price_per_hour=price, seed=var_seed,
+    )
+
+    fig_ytd, ax_ytd = plt.subplots(figsize=(8, 4))
+    months_list = list(monthly_kpi.index)
+    ax_ytd.plot(months_list, monthly_kpi["YTD Actual Revenue"], marker="o",
+                linewidth=2, color="#4e79a7", label="YTD Actual")
+    ax_ytd.plot(months_list, monthly_kpi["YTD Budget Revenue"], linestyle="--",
+                linewidth=2, color="#888780", label="YTD Budget")
+    ax_ytd.fill_between(
+        months_list,
+        monthly_kpi["YTD Actual Revenue"],
+        monthly_kpi["YTD Budget Revenue"],
+        alpha=0.15,
+        color="#4e79a7",
+    )
+    ax_ytd.set_ylabel("Cumulative Revenue ($)")
+    ax_ytd.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    ax_ytd.set_title("Year-to-Date Revenue: Actual vs Budget")
+    ax_ytd.legend()
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    st.pyplot(fig_ytd)
+    plt.close(fig_ytd)
+
 # =============================================================================
 # FOOTER
 # =============================================================================
@@ -423,5 +657,5 @@ st.divider()
 st.caption(
     "Gaming Arena Financial Model Toolkit  |  "
     "Built with Python, pandas, and Streamlit  |  "
-    "Data from config.py → model_engine.py → dashboard.py"
+    "Data from config.py -> model_engine.py -> dashboard.py"
 )
