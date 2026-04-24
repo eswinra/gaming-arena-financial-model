@@ -111,10 +111,11 @@ mc_sims = st.sidebar.number_input(
 
 st.sidebar.divider()
 st.sidebar.subheader("Variance Analysis")
-var_seed = st.sidebar.number_input(
-    "Actuals Seed",
-    min_value=1, max_value=999, value=42, step=1,
-    help="Change to simulate different actual outcomes. Same seed = same actuals.",
+var_scenario = st.sidebar.selectbox(
+    "Actuals Scenario",
+    options=["Worst Case", "Base Case", "Best Case"],
+    index=1,  # default = Base Case
+    help="Select a scenario to compare against budget. Each has specific, defensible assumptions.",
 )
 
 # =============================================================================
@@ -438,11 +439,15 @@ with tab6:
 # --- TAB 7: Variance Analysis ---
 with tab7:
     st.subheader("Budget vs Actual Variance Analysis")
-    st.caption("Simulated actuals with realistic variance from budget assumptions")
+
+    # Import scenario descriptions for display
+    from variance_analysis import VARIANCE_SCENARIOS
+    sc_info = VARIANCE_SCENARIOS[var_scenario]
+    st.caption(f"**{sc_info['label']}**: {sc_info['description']}")
 
     budget = build_budget(daily_device_hours=daily_hours, price_per_hour=price)
     actuals_data = build_actuals(
-        daily_device_hours=daily_hours, price_per_hour=price, seed=var_seed,
+        daily_device_hours=daily_hours, price_per_hour=price, scenario=var_scenario,
     )
     variance = compute_variance(budget, actuals_data)
 
@@ -513,7 +518,7 @@ with tab7:
     # Monthly trend
     st.subheader("Monthly Trend Analysis")
     monthly = build_monthly_actuals(
-        daily_device_hours=daily_hours, price_per_hour=price, seed=var_seed,
+        daily_device_hours=daily_hours, price_per_hour=price, scenario=var_scenario,
     )
 
     fig_trend, (ax_rev_t, ax_eb_t) = plt.subplots(1, 2, figsize=(12, 4))
@@ -546,7 +551,7 @@ with tab8:
 
     budget_kpi = build_budget(daily_device_hours=daily_hours, price_per_hour=price)
     actuals_kpi = build_actuals(
-        daily_device_hours=daily_hours, price_per_hour=price, seed=var_seed,
+        daily_device_hours=daily_hours, price_per_hour=price, scenario=var_scenario,
     )
     scorecard = build_kpi_scorecard(budget_kpi, actuals_kpi)
 
@@ -631,7 +636,7 @@ with tab8:
     # YTD trend chart
     st.subheader("YTD Revenue Tracking")
     monthly_kpi = build_monthly_actuals(
-        daily_device_hours=daily_hours, price_per_hour=price, seed=var_seed,
+        daily_device_hours=daily_hours, price_per_hour=price, scenario=var_scenario,
     )
 
     fig_ytd, ax_ytd = plt.subplots(figsize=(8, 4))

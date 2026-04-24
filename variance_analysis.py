@@ -98,60 +98,131 @@ def build_budget(
     return budget
 
 
+# =============================================================================
+# SCENARIO DEFINITIONS
+# =============================================================================
+# CONCEPT: Instead of random simulations, define structured scenarios
+# with specific assumptions for each. This is how real FP&A works --
+# management reviews worst/base/best cases with clear logic behind each.
+
+VARIANCE_SCENARIOS = {
+    "Worst Case": {
+        "label": "Worst Case",
+        "description": "Low traffic, price pressure, cost overruns",
+        "hours_adjustment": -15,       # 85 daily hours (17.7% utilization)
+        "price_adjustment": -0.50,     # $8.50/hr -- had to discount to drive traffic
+        "fnb_factor": 0.90,           # F&B 10% below plan (fewer visitors)
+        "cogs_adjustment": +0.05,     # 45% COGS -- supplier costs up
+        "opex_factors": {
+            "Rent and CAM": 1.02,             # Lease escalation clause triggered
+            "Utilities and Internet": 1.08,   # Higher utility rates
+            "Insurance": 1.05,                # Premium increase at renewal
+            "Owner Salary": 1.00,             # Fixed
+            "Part-Time Wages": 1.12,          # Overtime + higher min wage
+            "Payroll Taxes and Benefits": 1.10,
+            "Tournament Prizes": 1.20,        # Bigger prizes to attract players
+            "Software and IT Subscriptions": 1.05,
+            "Marketing and Advertising": 1.25, # Spent more trying to drive traffic
+            "Repairs and Maintenance": 1.15,   # Older equipment = more repairs
+            "Janitorial and Trash": 1.03,
+            "Accounting and Professional Fees": 1.08,
+            "Office and Miscellaneous": 1.05,
+        },
+    },
+    "Base Case": {
+        "label": "Base Case",
+        "description": "Budget assumptions hold, minor variances",
+        "hours_adjustment": -3,        # 97 daily hours -- slightly under plan
+        "price_adjustment": 0.00,      # Price held at $9.00
+        "fnb_factor": 1.02,           # F&B slightly above plan
+        "cogs_adjustment": +0.01,     # 41% COGS -- marginal increase
+        "opex_factors": {
+            "Rent and CAM": 1.00,
+            "Utilities and Internet": 1.02,
+            "Insurance": 1.00,
+            "Owner Salary": 1.00,
+            "Part-Time Wages": 1.03,          # Slight overtime
+            "Payroll Taxes and Benefits": 1.02,
+            "Tournament Prizes": 1.00,
+            "Software and IT Subscriptions": 0.98,
+            "Marketing and Advertising": 1.05,
+            "Repairs and Maintenance": 1.02,
+            "Janitorial and Trash": 1.00,
+            "Accounting and Professional Fees": 1.00,
+            "Office and Miscellaneous": 1.01,
+        },
+    },
+    "Best Case": {
+        "label": "Best Case",
+        "description": "Strong traffic, pricing power, cost discipline",
+        "hours_adjustment": +10,       # 110 daily hours (22.9% utilization)
+        "price_adjustment": +0.50,     # $9.50/hr -- demand supports premium
+        "fnb_factor": 1.12,           # F&B 12% above plan (more visitors buying)
+        "cogs_adjustment": -0.02,     # 38% COGS -- better supplier terms
+        "opex_factors": {
+            "Rent and CAM": 1.00,             # Locked in
+            "Utilities and Internet": 1.01,
+            "Insurance": 1.00,
+            "Owner Salary": 1.00,
+            "Part-Time Wages": 0.95,          # Efficient scheduling
+            "Payroll Taxes and Benefits": 0.96,
+            "Tournament Prizes": 0.90,        # Sponsors covered some costs
+            "Software and IT Subscriptions": 0.95, # Renegotiated annual deal
+            "Marketing and Advertising": 0.85, # Word of mouth reduced ad spend
+            "Repairs and Maintenance": 0.92,   # Newer equipment, fewer issues
+            "Janitorial and Trash": 0.98,
+            "Accounting and Professional Fees": 0.95,
+            "Office and Miscellaneous": 0.95,
+        },
+    },
+}
+
+
 def build_actuals(
     daily_device_hours: int = None,
     price_per_hour: float = None,
-    seed: int = 42,
+    scenario: str = "Base Case",
 ) -> dict:
     """
-    Simulate actual results with realistic variance from budget.
+    Build actual results based on a structured scenario.
 
-    CONCEPT: In real life, actuals come from your ERP/accounting system.
-    Here we simulate them by applying random but realistic adjustments
-    to the budget. This lets you practice the analysis workflow.
+    CONCEPT: In real FP&A, actuals come from the GL/ERP system.
+    For this business plan, we define three structured scenarios
+    (worst/base/best) with specific, defensible assumptions for
+    each line item. This is how management teams actually plan --
+    not with random numbers, but with reasoned cases.
 
-    Each line item gets a variance driver:
-    - Revenue: driven by actual utilization (hours) and pricing
-    - Variable costs: scale with revenue
-    - Fixed costs: random walk around budget (+/- 5-15%)
+    Each scenario has a clear narrative:
+    - Worst: low traffic, price discounting, cost overruns
+    - Base: plan mostly holds, minor variances
+    - Best: strong demand, pricing power, cost discipline
     """
     a = ASSUMPTIONS
-    rng = np.random.RandomState(seed)
+    sc = VARIANCE_SCENARIOS[scenario]
 
     budget_hours = daily_device_hours or a["utilization"]["base_case_hours"]
     budget_price = price_per_hour or a["pricing"]["price_per_hour"]
     days = a["capacity"]["days_per_year"]
 
-    # Simulate actual utilization and pricing
-    # Hours came in slightly below budget, price held steady
-    actual_hours = budget_hours + rng.randint(-12, 6)
-    actual_price = budget_price + rng.uniform(-0.25, 0.50)
+    actual_hours = budget_hours + sc["hours_adjustment"]
+    actual_price = budget_price + sc["price_adjustment"]
 
     gaming_rev = actual_hours * actual_price * days
-    fnb_rev = a["fnb"]["year1_revenue"] * (1 + rng.uniform(-0.05, 0.08))
+    fnb_rev = a["fnb"]["year1_revenue"] * sc["fnb_factor"]
     total_rev = gaming_rev + fnb_rev
 
-    fnb_cogs = fnb_rev * (a["fnb"]["cogs_pct"] + rng.uniform(-0.02, 0.03))
+    fnb_cogs = fnb_rev * (a["fnb"]["cogs_pct"] + sc["cogs_adjustment"])
     gross_profit = total_rev - fnb_cogs
 
-    # Operating expenses -- each gets independent variance
+    # Operating expenses with scenario-specific factors
     opex = {}
     merchant_fees = total_rev * a["fees"]["merchant_processing_pct"]
     for name, category, base_amount in OPEX_BUDGET:
         if name == "Merchant & Card Processing Fees":
             opex[name] = merchant_fees
-        elif name in ["Rent and CAM", "Insurance"]:
-            # Contractual -- very little variance
-            opex[name] = base_amount * (1 + rng.uniform(-0.01, 0.02))
-        elif name in ["Part-Time Wages", "Payroll Taxes and Benefits"]:
-            # Labor -- moderate variance (overtime, scheduling)
-            opex[name] = base_amount * (1 + rng.uniform(-0.03, 0.08))
-        elif name in ["Marketing and Advertising", "Tournament Prizes"]:
-            # Discretionary -- can swing more
-            opex[name] = base_amount * (1 + rng.uniform(-0.10, 0.15))
         else:
-            # Everything else -- small variance
-            opex[name] = base_amount * (1 + rng.uniform(-0.05, 0.07))
+            factor = sc["opex_factors"].get(name, 1.00)
+            opex[name] = base_amount * factor
 
     depreciation = a["depreciation"]["annual_depreciation"]
     total_opex = sum(opex.values()) + depreciation
@@ -375,23 +446,28 @@ def build_variance_waterfall(variance_df: pd.DataFrame) -> pd.DataFrame:
 def build_monthly_actuals(
     daily_device_hours: int = None,
     price_per_hour: float = None,
-    seed: int = 42,
+    scenario: str = "Base Case",
 ) -> pd.DataFrame:
     """
-    Generate simulated monthly actuals for trend analysis.
+    Generate monthly actuals based on a structured scenario with seasonality.
 
     CONCEPT: Period-over-period trend analysis shows whether
     performance is improving, declining, or seasonal. Every FP&A
     role requires this for monthly reporting packages.
 
+    Instead of random noise, this applies the scenario's assumptions
+    on top of realistic seasonality patterns. The result is deterministic
+    and defensible -- same scenario always produces the same monthly
+    numbers, and each month's variance has a clear explanation.
+
     Returns a DataFrame with monthly P&L data including
     month-over-month and cumulative YTD columns.
     """
     a = ASSUMPTIONS
-    rng = np.random.RandomState(seed)
+    sc = VARIANCE_SCENARIOS[scenario]
 
-    hours = daily_device_hours or a["utilization"]["base_case_hours"]
-    price = price_per_hour or a["pricing"]["price_per_hour"]
+    budget_hours = daily_device_hours or a["utilization"]["base_case_hours"]
+    budget_price = price_per_hour or a["pricing"]["price_per_hour"]
     days_per_month = a["capacity"]["days_per_year"] / 12
 
     # Seasonality factors (gaming arenas are busier in summer and holidays)
@@ -402,31 +478,36 @@ def build_monthly_actuals(
         "Oct": 1.00, "Nov": 1.05, "Dec": 1.10,
     }
 
+    # Scenario adjustments applied uniformly across months
+    actual_hours_annual = budget_hours + sc["hours_adjustment"]
+    actual_price = budget_price + sc["price_adjustment"]
+    actual_cogs_pct = a["fnb"]["cogs_pct"] + sc["cogs_adjustment"]
+
     months = list(seasonality.keys())
     monthly_data = []
 
-    for i, month in enumerate(months):
+    for month in months:
         factor = seasonality[month]
 
-        # Hours vary by season + random noise
-        m_hours = hours * factor + rng.randint(-8, 8)
-        m_price = price + rng.uniform(-0.15, 0.15)
-        m_days = days_per_month + rng.randint(-1, 2)
+        # Actual monthly hours = scenario-adjusted hours × seasonality
+        m_hours = actual_hours_annual * factor
+        m_days = days_per_month  # deterministic, no random jitter
 
-        gaming_rev = m_hours * m_price * m_days
-        fnb_rev = (a["fnb"]["year1_revenue"] / 12) * factor
+        gaming_rev = m_hours * actual_price * m_days
+        fnb_rev = (a["fnb"]["year1_revenue"] / 12) * factor * sc["fnb_factor"]
         total_rev = gaming_rev + fnb_rev
 
-        fnb_cogs = fnb_rev * a["fnb"]["cogs_pct"]
+        fnb_cogs = fnb_rev * actual_cogs_pct
         gross_profit = total_rev - fnb_cogs
 
-        # Monthly OpEx (annual / 12 with variance)
+        # Monthly OpEx with scenario factors
         monthly_opex = 0
         for name, category, base_amount in OPEX_BUDGET:
             if name == "Merchant & Card Processing Fees":
                 monthly_opex += total_rev * a["fees"]["merchant_processing_pct"]
             else:
-                monthly_opex += (base_amount / 12) * (1 + rng.uniform(-0.05, 0.05))
+                opex_factor = sc["opex_factors"].get(name, 1.00)
+                monthly_opex += (base_amount / 12) * opex_factor
 
         depreciation = a["depreciation"]["annual_depreciation"] / 12
         ebitda = gross_profit - monthly_opex
@@ -435,7 +516,7 @@ def build_monthly_actuals(
         pretax = ebit - interest
 
         # Monthly budget (straight-line, no seasonality)
-        budget_gaming = hours * price * days_per_month
+        budget_gaming = budget_hours * budget_price * days_per_month
         budget_fnb = a["fnb"]["year1_revenue"] / 12
         budget_total_rev = budget_gaming + budget_fnb
         budget_cogs = budget_fnb * a["fnb"]["cogs_pct"]
@@ -467,8 +548,8 @@ def build_monthly_actuals(
             "Actual Pre-Tax": pretax,
             "Budget Pre-Tax": budget_pretax,
             "Actual Hours": m_hours,
-            "Budget Hours": hours,
-            "Actual Price": m_price,
+            "Budget Hours": budget_hours,
+            "Actual Price": actual_price,
         })
 
     df = pd.DataFrame(monthly_data).set_index("Month")
@@ -673,72 +754,77 @@ if __name__ == "__main__":
     print("MODULE 7: BUDGET VS ACTUAL VARIANCE ANALYSIS")
     print("=" * 70)
 
-    # Build budget and actuals
-    budget = build_budget()
-    actuals = build_actuals()
+    # Test all three scenarios
+    for scenario_name in VARIANCE_SCENARIOS:
+        sc = VARIANCE_SCENARIOS[scenario_name]
+        print(f"\n{'=' * 70}")
+        print(f"SCENARIO: {sc['label']} — {sc['description']}")
+        print(f"{'=' * 70}")
 
-    print("\n--- Annual Variance Report ---")
-    variance = compute_variance(budget, actuals)
+        budget = build_budget()
+        actuals = build_actuals(scenario=scenario_name)
 
-    # Display formatted
-    for line_item, row in variance.iterrows():
-        flag = " *** " if row["Material"] else "     "
-        print(
-            f"{flag}{line_item:40s}  "
-            f"Budget: ${row['Budget']:>10,.0f}  "
-            f"Actual: ${row['Actual']:>10,.0f}  "
-            f"Var: ${row['Variance ($)']:>+10,.0f}  "
-            f"({row['Variance (%)']:>+6.1%})  "
-            f"{row['Direction']}"
-        )
+        print("\n--- Annual Variance Report ---")
+        variance = compute_variance(budget, actuals)
 
-    print("\n--- Variance Waterfall ---")
-    waterfall = build_variance_waterfall(variance)
-    for _, row in waterfall.iterrows():
-        print(f"  {row['Driver']:40s}  ${row['Impact ($)']:>+10,.0f}  {row['Direction']}")
+        for line_item, row in variance.iterrows():
+            flag = " *** " if row["Material"] else "     "
+            print(
+                f"{flag}{line_item:40s}  "
+                f"Budget: ${row['Budget']:>10,.0f}  "
+                f"Actual: ${row['Actual']:>10,.0f}  "
+                f"Var: ${row['Variance ($)']:>+10,.0f}  "
+                f"({row['Variance (%)']:>+6.1%})  "
+                f"{row['Direction']}"
+            )
 
-    print(f"\n  Budget Pre-Tax: ${variance.loc['Pre-Tax Income', 'Budget']:>10,.0f}")
-    print(f"  Actual Pre-Tax: ${variance.loc['Pre-Tax Income', 'Actual']:>10,.0f}")
+        print("\n--- Variance Waterfall ---")
+        waterfall = build_variance_waterfall(variance)
+        for _, row in waterfall.iterrows():
+            print(f"  {row['Driver']:40s}  ${row['Impact ($)']:>+10,.0f}  {row['Direction']}")
 
-    print("\n--- Variance Commentary ---")
-    commentary = generate_variance_commentary(variance)
-    for i, comment in enumerate(commentary, 1):
-        print(f"  {i}. {comment}")
+        print(f"\n  Budget Pre-Tax: ${variance.loc['Pre-Tax Income', 'Budget']:>10,.0f}")
+        print(f"  Actual Pre-Tax: ${variance.loc['Pre-Tax Income', 'Actual']:>10,.0f}")
 
-    print("\n--- KPI Scorecard ---")
-    scorecard = build_kpi_scorecard(budget, actuals)
-    for _, row in scorecard.iterrows():
-        if row["Unit"] == "$":
-            t_fmt = f"${row['Target']:>10,.0f}"
-            a_fmt = f"${row['Actual']:>10,.0f}"
-        elif row["Unit"] == "%":
-            t_fmt = f"{row['Target']:>10.1%}"
-            a_fmt = f"{row['Actual']:>10.1%}"
-        else:
-            t_fmt = f"{row['Target']:>10.2f}x"
-            a_fmt = f"{row['Actual']:>10.2f}x"
+        print("\n--- Variance Commentary ---")
+        commentary = generate_variance_commentary(variance)
+        for i, comment in enumerate(commentary, 1):
+            print(f"  {i}. {comment}")
 
-        print(
-            f"  [{row['RAG']:>5s}]  {row['KPI']:25s}  "
-            f"Target: {t_fmt}  Actual: {a_fmt}  "
-            f"Var: {row['Variance (%)']:>+6.1%}"
-        )
+        print("\n--- KPI Scorecard ---")
+        scorecard = build_kpi_scorecard(budget, actuals)
+        for _, row in scorecard.iterrows():
+            if row["Unit"] == "$":
+                t_fmt = f"${row['Target']:>10,.0f}"
+                a_fmt = f"${row['Actual']:>10,.0f}"
+            elif row["Unit"] == "%":
+                t_fmt = f"{row['Target']:>10.1%}"
+                a_fmt = f"{row['Actual']:>10.1%}"
+            else:
+                t_fmt = f"{row['Target']:>10.2f}x"
+                a_fmt = f"{row['Actual']:>10.2f}x"
 
-    print("\n--- Monthly Trend (first 6 months) ---")
-    monthly = build_monthly_actuals()
-    for month in list(monthly.index)[:6]:
-        row = monthly.loc[month]
-        print(
-            f"  {month}  "
-            f"Rev: ${row['Actual Revenue']:>8,.0f} vs ${row['Budget Revenue']:>8,.0f}  "
-            f"Var: {row['Revenue Variance (%)']:>+6.1%}  "
-            f"EBITDA: ${row['Actual EBITDA']:>8,.0f}"
-        )
+            print(
+                f"  [{row['RAG']:>5s}]  {row['KPI']:25s}  "
+                f"Target: {t_fmt}  Actual: {a_fmt}  "
+                f"Var: {row['Variance (%)']:>+6.1%}"
+            )
 
-    print("\n--- YTD Summary (through December) ---")
-    last = monthly.iloc[-1]
-    print(f"  YTD Revenue:  Actual ${last['YTD Actual Revenue']:>10,.0f}  "
-          f"Budget ${last['YTD Budget Revenue']:>10,.0f}  "
-          f"Var ${last['YTD Revenue Variance ($)']:>+10,.0f}")
-    print(f"  YTD EBITDA:   Actual ${last['YTD Actual EBITDA']:>10,.0f}  "
-          f"Budget ${last['YTD Budget EBITDA']:>10,.0f}")
+        print("\n--- Monthly Trend (first 6 months) ---")
+        monthly = build_monthly_actuals(scenario=scenario_name)
+        for month in list(monthly.index)[:6]:
+            row = monthly.loc[month]
+            print(
+                f"  {month}  "
+                f"Rev: ${row['Actual Revenue']:>8,.0f} vs ${row['Budget Revenue']:>8,.0f}  "
+                f"Var: {row['Revenue Variance (%)']:>+6.1%}  "
+                f"EBITDA: ${row['Actual EBITDA']:>8,.0f}"
+            )
+
+        print("\n--- YTD Summary (through December) ---")
+        last = monthly.iloc[-1]
+        print(f"  YTD Revenue:  Actual ${last['YTD Actual Revenue']:>10,.0f}  "
+              f"Budget ${last['YTD Budget Revenue']:>10,.0f}  "
+              f"Var ${last['YTD Revenue Variance ($)']:>+10,.0f}")
+        print(f"  YTD EBITDA:   Actual ${last['YTD Actual EBITDA']:>10,.0f}  "
+              f"Budget ${last['YTD Budget EBITDA']:>10,.0f}")
