@@ -184,7 +184,7 @@ st.divider()
 # TABBED SECTIONS
 # =============================================================================
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
     "Income Statement",
     "Cash Flow & Balance Sheet",
     "Scenarios",
@@ -193,6 +193,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "Breakeven",
     "Variance Analysis",
     "KPI Scorecard",
+    "Cost Drivers",
 ])
 
 # --- TAB 1: Income Statement ---
@@ -660,6 +661,267 @@ with tab8:
     plt.tight_layout()
     st.pyplot(fig_ytd)
     plt.close(fig_ytd)
+
+# --- TAB 9: Cost Drivers ---
+with tab9:
+    st.subheader("Cost Driver Analysis")
+    st.caption(
+        "See where your money goes and test how adjusting major expenses affects profitability. "
+        "Sliders below let you simulate rent negotiations, staffing changes, and other cost levers."
+    )
+
+    # ---- Current cost breakdown ----
+    # Pull Year 1 baseline from the model already computed above
+    y1_rev = inc.loc["Total Revenue", y1]
+    y1_opex_items = []
+    for name, category, base_amount in OPEX_BUDGET:
+        if name == "Merchant & Card Processing Fees":
+            amt = y1_rev * a["fees"]["merchant_processing_pct"]
+        else:
+            amt = base_amount
+        y1_opex_items.append({"Expense": name, "Amount": amt, "Category": category})
+
+    # Add depreciation and interest for full picture
+    y1_opex_items.append({"Expense": "Depreciation", "Amount": a["depreciation"]["annual_depreciation"], "Category": "non-cash"})
+    y1_opex_items.append({"Expense": "Interest Expense", "Amount": a["debt"]["loan_amount"] * a["debt"]["interest_rate"], "Category": "financing"})
+
+    cost_df = pd.DataFrame(y1_opex_items)
+    cost_df["% of Revenue"] = cost_df["Amount"] / y1_rev
+    cost_df = cost_df.sort_values("Amount", ascending=True)  # ascending for horizontal bar
+
+    # Horizontal bar chart — biggest expenses at top
+    st.markdown("**Year 1 Cost Breakdown (sorted by size)**")
+    fig_cost, ax_cost = plt.subplots(figsize=(9, 5))
+    bar_colors = []
+    for _, row in cost_df.iterrows():
+        if row["Amount"] >= 30_000:
+            bar_colors.append("#e15759")   # red = high-impact
+        elif row["Amount"] >= 10_000:
+            bar_colors.append("#f28e2b")   # orange = moderate
+        else:
+            bar_colors.append("#76b7b2")   # teal = low
+    ax_cost.barh(cost_df["Expense"], cost_df["Amount"], color=bar_colors)
+    ax_cost.set_xlabel("Annual Amount ($)")
+    ax_cost.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+
+    # Annotate % of revenue on each bar
+    for i, (_, row) in enumerate(cost_df.iterrows()):
+        ax_cost.text(
+            row["Amount"] + y1_rev * 0.005, i,
+            f"{row['% of Revenue']:.1%}",
+            va="center", fontsize=8, color="#555",
+        )
+
+    ax_cost.set_title("Annual Expenses — Red = High Impact, Orange = Moderate, Teal = Low")
+    plt.tight_layout()
+    st.pyplot(fig_cost)
+    plt.close(fig_cost)
+
+    st.divider()
+
+    # ---- What-If Cost Adjustments ----
+    st.markdown("### What-If: Adjust Cost Levers")
+    st.caption(
+        "Drag the sliders to test scenarios like negotiating lower rent, "
+        "cutting staff hours, or reducing marketing spend. The model recalculates instantly."
+    )
+
+    # Define adjustable cost levers with their base amounts and reasonable ranges
+    adj_col1, adj_col2, adj_col3 = st.columns(3)
+
+    with adj_col1:
+        adj_rent = st.slider(
+            "Rent & CAM ($/yr)",
+            min_value=48_000, max_value=96_000, value=78_000, step=2_000,
+            help="Base: $78,000. A smaller or cheaper space could cut this significantly.",
+        )
+        adj_wages = st.slider(
+            "Part-Time Wages ($/yr)",
+            min_value=30_000, max_value=85_000, value=65_700, step=1_000,
+            help="Base: $65,700. Fewer shifts or lower headcount reduces this.",
+        )
+
+    with adj_col2:
+        adj_owner = st.slider(
+            "Owner Salary ($/yr)",
+            min_value=0, max_value=65_000, value=45_000, step=5_000,
+            help="Base: $45,000. Some owners take less in Year 1 to improve cash flow.",
+        )
+        adj_utilities = st.slider(
+            "Utilities & Internet ($/yr)",
+            min_value=10_000, max_value=24_000, value=18_000, step=1_000,
+            help="Base: $18,000. Energy-efficient equipment or better rates.",
+        )
+
+    with adj_col3:
+        adj_insurance = st.slider(
+            "Insurance ($/yr)",
+            min_value=6_000, max_value=18_000, value=12_000, step=1_000,
+            help="Base: $12,000. Shop around or adjust coverage levels.",
+        )
+        adj_marketing = st.slider(
+            "Marketing & Advertising ($/yr)",
+            min_value=1_000, max_value=12_000, value=6_000, step=500,
+            help="Base: $6,000. Organic growth vs paid acquisition tradeoff.",
+        )
+
+    # Recalculate with adjusted costs
+    adjusted_opex = 0
+    original_opex = 0
+    adjustments_map = {
+        "Rent and CAM": adj_rent,
+        "Owner Salary": adj_owner,
+        "Part-Time Wages": adj_wages,
+        "Utilities and Internet": adj_utilities,
+        "Insurance": adj_insurance,
+        "Marketing and Advertising": adj_marketing,
+    }
+
+    for name, category, base_amount in OPEX_BUDGET:
+        if name == "Merchant & Card Processing Fees":
+            original_opex += y1_rev * a["fees"]["merchant_processing_pct"]
+            adjusted_opex += y1_rev * a["fees"]["merchant_processing_pct"]
+        elif name in adjustments_map:
+            original_opex += base_amount
+            adjusted_opex += adjustments_map[name]
+        else:
+            original_opex += base_amount
+            adjusted_opex += base_amount
+
+    # Also add payroll taxes adjustment proportional to wage change
+    # If wages change, payroll taxes scale proportionally
+    wage_ratio = adj_wages / 65_700 if 65_700 > 0 else 1.0
+    payroll_tax_base = 13_284
+    adj_payroll_tax = payroll_tax_base * wage_ratio
+    # Already counted base payroll taxes in the loop above, adjust the delta
+    adjusted_opex += (adj_payroll_tax - payroll_tax_base)
+
+    depreciation = a["depreciation"]["annual_depreciation"]
+    interest = a["debt"]["loan_amount"] * a["debt"]["interest_rate"]
+
+    # F&B COGS
+    fnb_rev = a["fnb"]["year1_revenue"]
+    fnb_cogs = fnb_rev * a["fnb"]["cogs_pct"]
+    gaming_rev = daily_hours * price * a["capacity"]["days_per_year"]
+    total_rev_calc = gaming_rev + fnb_rev
+    gross_profit = total_rev_calc - fnb_cogs
+
+    orig_ebitda = gross_profit - original_opex
+    adj_ebitda = gross_profit - adjusted_opex
+    orig_ebit = orig_ebitda - depreciation
+    adj_ebit = adj_ebitda - depreciation
+    orig_pretax = orig_ebit - interest
+    adj_pretax = adj_ebit - interest
+
+    opex_savings = original_opex - adjusted_opex
+
+    st.divider()
+
+    # ---- Impact Summary ----
+    st.markdown("### Impact on Profitability")
+
+    imp1, imp2, imp3, imp4 = st.columns(4)
+    imp1.metric(
+        "OpEx Savings",
+        f"${opex_savings:,.0f}",
+        delta=f"${opex_savings:+,.0f}" if opex_savings != 0 else None,
+        delta_color="normal",
+    )
+    imp2.metric(
+        "Adjusted EBITDA",
+        f"${adj_ebitda:,.0f}",
+        delta=f"${adj_ebitda - orig_ebitda:+,.0f}",
+        delta_color="normal",
+    )
+    imp3.metric(
+        "Adjusted Pre-Tax",
+        f"${adj_pretax:,.0f}",
+        delta=f"${adj_pretax - orig_pretax:+,.0f}",
+        delta_color="normal",
+    )
+    # DSCR impact
+    annual_ds = a["debt"]["annual_principal_payment"] + interest
+    adj_dscr = (adj_pretax + depreciation) / annual_ds if annual_ds > 0 else 0
+    orig_dscr = (orig_pretax + depreciation) / annual_ds if annual_ds > 0 else 0
+    imp4.metric(
+        "Adjusted DSCR",
+        f"{adj_dscr:.2f}x",
+        delta=f"{adj_dscr - orig_dscr:+.2f}x",
+        delta_color="normal",
+    )
+
+    # Side-by-side comparison table
+    st.markdown("**Original vs Adjusted — Line-by-Line**")
+    comparison_rows = []
+    for name, category, base_amount in OPEX_BUDGET:
+        if name == "Merchant & Card Processing Fees":
+            orig_val = y1_rev * a["fees"]["merchant_processing_pct"]
+            adj_val = orig_val  # not adjustable
+        elif name in adjustments_map:
+            orig_val = base_amount
+            adj_val = adjustments_map[name]
+        else:
+            orig_val = base_amount
+            adj_val = base_amount
+
+        delta = adj_val - orig_val
+        comparison_rows.append({
+            "Expense": name,
+            "Original": f"${orig_val:,.0f}",
+            "Adjusted": f"${adj_val:,.0f}",
+            "Change ($)": f"${delta:+,.0f}" if delta != 0 else "—",
+            "Adjustable": "Yes" if name in adjustments_map else "",
+        })
+
+    # Add payroll tax row
+    comparison_rows.append({
+        "Expense": "Payroll Taxes & Benefits",
+        "Original": f"${payroll_tax_base:,.0f}",
+        "Adjusted": f"${adj_payroll_tax:,.0f}",
+        "Change ($)": f"${adj_payroll_tax - payroll_tax_base:+,.0f}" if adj_payroll_tax != payroll_tax_base else "—",
+        "Adjustable": "(auto)",
+    })
+
+    comp_df = pd.DataFrame(comparison_rows)
+
+    def highlight_changes(row):
+        if row["Change ($)"] != "—":
+            return ["background-color: #fff3cd"] * len(row)
+        return [""] * len(row)
+
+    styled_comp = comp_df.style.apply(highlight_changes, axis=1)
+    st.dataframe(styled_comp, use_container_width=True, hide_index=True)
+
+    # ---- Sensitivity: Which cost lever matters most? ----
+    st.divider()
+    st.markdown("### Cost Lever Sensitivity")
+    st.caption(
+        "Shows how a 10% cut to each major expense would improve EBITDA. "
+        "Helps prioritize which negotiations or cuts have the most impact."
+    )
+
+    lever_impact = []
+    for name, category, base_amount in OPEX_BUDGET:
+        if name == "Merchant & Card Processing Fees":
+            continue  # variable cost, can't really negotiate
+        savings_10pct = base_amount * 0.10
+        lever_impact.append({
+            "Expense": name,
+            "Current": base_amount,
+            "10% Cut": savings_10pct,
+        })
+
+    lever_df = pd.DataFrame(lever_impact).sort_values("10% Cut", ascending=True)
+
+    fig_lever, ax_lever = plt.subplots(figsize=(8, 4.5))
+    colors_lever = ["#59a14f" if v >= 3_000 else "#76b7b2" for v in lever_df["10% Cut"]]
+    ax_lever.barh(lever_df["Expense"], lever_df["10% Cut"], color=colors_lever)
+    ax_lever.set_xlabel("EBITDA Improvement from 10% Cut ($)")
+    ax_lever.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    ax_lever.set_title("Which Costs Move the Needle Most?")
+    plt.tight_layout()
+    st.pyplot(fig_lever)
+    plt.close(fig_lever)
 
 # =============================================================================
 # FOOTER
