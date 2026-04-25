@@ -264,7 +264,7 @@ with tab1:
 
     # Format the DataFrame for display
     # PYTHON CONCEPT: .map() applies a function to every cell
-    display_inc = inc.copy()
+    display_inc = inc.copy().astype(object)
     for col in display_inc.columns:
         display_inc[col] = display_inc[col].apply(
             lambda x: f"${x:,.0f}" if isinstance(x, (int, float)) and abs(x) > 1
@@ -296,7 +296,7 @@ with tab2:
 
     with c1:
         st.subheader("Cash Flow Statement")
-        display_cf = cf.copy()
+        display_cf = cf.copy().astype(object)
 
         # Mark section headers so they look like titles, not missing data
         section_headers = ["Cash Flow from Operations", "Cash Flow from Financing"]
@@ -314,7 +314,7 @@ with tab2:
 
     with c2:
         st.subheader("Key Ratios")
-        display_ratios = ratios.copy()
+        display_ratios = ratios.copy().astype(object)
         for idx in display_ratios.index:
             for col in display_ratios.columns:
                 val = display_ratios.loc[idx, col]
@@ -352,7 +352,7 @@ with tab3:
     comparison = run_scenario_comparison()
 
     # Format for display — row-aware formatting
-    display_comp = comparison.copy()
+    display_comp = comparison.copy().astype(object)
     for idx in display_comp.index:
         for col in display_comp.columns:
             val = display_comp.loc[idx, col]
@@ -1168,7 +1168,7 @@ with tab10:
 
     # ---- Adjusted Income Statement ----
     st.markdown("### Adjusted Income Statement")
-    display_adj_inc = adj_inc.copy()
+    display_adj_inc = adj_inc.copy().astype(object)
     for col in display_adj_inc.columns:
         display_adj_inc[col] = display_adj_inc[col].apply(
             lambda x: f"${x:,.0f}" if isinstance(x, (int, float)) and abs(x) > 1
@@ -1619,7 +1619,7 @@ with tab14:
     st.divider()
     st.markdown("### Unlevered Free Cash Flow Schedule")
     ufcf_df = dcf["ufcf_schedule"]
-    display_ufcf = ufcf_df.copy()
+    display_ufcf = ufcf_df.copy().astype(object)
     for idx in display_ufcf.index:
         for col in display_ufcf.columns:
             val = display_ufcf.loc[idx, col]
