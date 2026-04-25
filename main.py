@@ -16,6 +16,7 @@ HOW TO USE:
   python main.py --mode sensitivity → Build sensitivity table
   python main.py --mode excel       → Generate Excel workbook
   python main.py --mode montecarlo  → Run Monte Carlo simulation
+  python main.py --mode accounting  → Show GL, trial balance, FS mapping
   python main.py --mode all         → Run everything and export Excel
 
   python main.py --hours 120        → Override daily device-hours
@@ -51,7 +52,8 @@ Examples:
     parser.add_argument(
         "--mode",
         choices=["model", "scenarios", "sensitivity", "excel", "montecarlo",
-                 "variance", "forecast", "uniteconomics", "executive", "all"],
+                 "variance", "forecast", "uniteconomics", "executive",
+                 "dcf", "integrity", "accounting", "all"],
         default="model",
         help="What to run (default: model)",
     )
@@ -293,6 +295,97 @@ Examples:
         print("\n  RECOMMENDATIONS:")
         for i, rec in enumerate(exec_summary["recommendations"], 1):
             print(f"    {i}. {rec}")
+
+    # =========================================================================
+    # MODE: DCF VALUATION
+    # =========================================================================
+    if args.mode in ("dcf", "all"):
+        print("\n\n--- DCF BUSINESS VALUATION ---")
+        print("-" * 70)
+        from dcf_valuation import build_dcf_valuation, build_dcf_sensitivity
+        dcf = build_dcf_valuation(
+            daily_device_hours=hours, price_per_hour=price,
+            forecast_years=5, wacc=0.12, terminal_growth_rate=0.02,
+        )
+        print(f"  PV of UFCFs:          ${dcf['pv_ufcf_total']:>12,.0f}")
+        print(f"  PV of Terminal Value:  ${dcf['pv_terminal']:>12,.0f}")
+        print(f"  Enterprise Value:     ${dcf['enterprise_value']:>12,.0f}")
+        print(f"  Less: Net Debt:       ${dcf['net_debt']:>12,.0f}")
+        print(f"  Equity Value:         ${dcf['equity_value']:>12,.0f}")
+        print(f"\n  EV/EBITDA:            {dcf['metrics']['ev_to_ebitda']:>12.1f}x")
+        print(f"  ROI on Equity:        {dcf['metrics']['roi_on_equity']:>12.1%}")
+        print(f"  ROI on Investment:    {dcf['metrics']['roi_on_total_investment']:>12.1%}")
+        print(f"  TV as % of EV:        {dcf['metrics']['tv_as_pct_of_ev']:>12.1%}")
+
+        print("\n  Sensitivity (Equity Value — WACC vs Growth):")
+        sens_dcf = build_dcf_sensitivity(
+            daily_device_hours=hours, price_per_hour=price, forecast_years=5,
+        )
+        formatted_dcf = sens_dcf.map(
+            lambda x: f"${x:>10,.0f}" if isinstance(x, (int, float)) and x != float('inf') else "N/A"
+        )
+        print(formatted_dcf.to_string())
+
+    # =========================================================================
+    # MODE: MODEL INTEGRITY
+    # =========================================================================
+    if args.mode in ("integrity", "all"):
+        print("\n\n--- MODEL INTEGRITY CHECKS ---")
+        print("-" * 70)
+        from model_integrity import run_integrity_checks, summarize_integrity
+        checks = run_integrity_checks(
+            daily_device_hours=hours, price_per_hour=price,
+            forecast_years=years,
+        )
+        summary_ic = summarize_integrity(checks)
+        print(f"  Overall: {summary_ic['overall']}")
+        print(f"  Passed: {summary_ic['passed']} | Failed: {summary_ic['failed']} | "
+              f"Warnings: {summary_ic['warnings']} | Pass Rate: {summary_ic['pass_rate']:.0%}")
+        for c in checks:
+            icon = "PASS" if c["Status"] == "PASS" else "FAIL" if c["Status"] == "FAIL" else "WARN"
+            if c["Status"] != "PASS":
+                print(f"  [{icon}] {c['Check']}: {c['Detail']}")
+
+    # =========================================================================
+    # MODE: ACCOUNTING
+    # =========================================================================
+    if args.mode in ("accounting", "all"):
+        print("\n\n--- ACCOUNTING & GENERAL LEDGER ---")
+        print("-" * 70)
+        from accounting_engine import (
+            get_chart_of_accounts_df, get_journal_entries_df,
+            build_trial_balance, validate_trial_balance, build_fs_mapping,
+        )
+
+        # Chart of Accounts summary
+        coa = get_chart_of_accounts_df()
+        print(f"\n  Chart of Accounts: {len(coa)} accounts")
+        for acct_type in ["Asset", "Liability", "Equity", "Revenue", "Expense"]:
+            count = len(coa[coa["Type"] == acct_type])
+            print(f"    {acct_type:<12s}: {count} accounts")
+
+        # Journal Entries summary
+        je_df = get_journal_entries_df(daily_device_hours=hours, price_per_hour=price)
+        n_entries = je_df["JE #"].nunique()
+        print(f"\n  Journal Entries: {n_entries} entries, {len(je_df)} lines")
+        print(f"    Total Debits:  ${je_df['Debit'].sum():>12,.2f}")
+        print(f"    Total Credits: ${je_df['Credit'].sum():>12,.2f}")
+
+        # Trial Balance
+        tb = build_trial_balance(daily_device_hours=hours, price_per_hour=price)
+        tb_valid = validate_trial_balance(tb)
+        print(f"\n  Trial Balance: {'BALANCED' if tb_valid['is_balanced'] else 'OUT OF BALANCE'}")
+        print(f"    Debits:  ${tb_valid['total_debits']:>12,.2f}")
+        print(f"    Credits: ${tb_valid['total_credits']:>12,.2f}")
+
+        # FS Mapping
+        fs = build_fs_mapping(daily_device_hours=hours, price_per_hour=price)
+        t = fs["totals"]
+        print(f"\n  GL → Financial Statements:")
+        print(f"    Revenue:        ${t['total_revenue']:>12,.2f}")
+        print(f"    Gross Profit:   ${t['gross_profit']:>12,.2f}")
+        print(f"    EBITDA:         ${t['ebitda']:>12,.2f}")
+        print(f"    Pre-Tax Income: ${t['pretax_income']:>12,.2f}")
 
     # =========================================================================
     # MODE: EXCEL

@@ -63,6 +63,18 @@ from rolling_forecast import (
 )
 from unit_economics import compute_unit_economics, build_driver_sensitivity
 from executive_summary import generate_executive_summary
+from dcf_valuation import build_dcf_valuation, build_dcf_sensitivity
+from model_integrity import run_integrity_checks, summarize_integrity
+from accounting_engine import (
+    get_chart_of_accounts_df,
+    get_journal_entries_df,
+    build_general_ledger,
+    build_trial_balance,
+    validate_trial_balance,
+    build_fs_mapping,
+    build_monthly_gl_summary,
+    CHART_OF_ACCOUNTS,
+)
 
 # =============================================================================
 # PAGE CONFIGURATION
@@ -141,6 +153,24 @@ reforecast_method = st.sidebar.selectbox(
     help="run_rate: YTD average. budget: original plan. trending: apply YTD variance ratio.",
 )
 
+st.sidebar.divider()
+st.sidebar.subheader("DCF Valuation")
+dcf_wacc = st.sidebar.slider(
+    "WACC (%)",
+    min_value=6.0, max_value=20.0, value=12.0, step=0.5,
+    help="Weighted average cost of capital. Higher = lower valuation.",
+)
+dcf_terminal_g = st.sidebar.slider(
+    "Terminal Growth (%)",
+    min_value=0.0, max_value=5.0, value=2.0, step=0.5,
+    help="Long-run perpetual growth rate. Usually 2-3% (GDP growth).",
+)
+dcf_tax_rate = st.sidebar.slider(
+    "Tax Rate (%)",
+    min_value=0.0, max_value=40.0, value=25.0, step=1.0,
+    help="Assumed income tax rate for NOPAT calculation.",
+)
+
 # =============================================================================
 # RUN THE MODEL (recalculates every time an input changes)
 # =============================================================================
@@ -207,20 +237,25 @@ st.divider()
 # TABBED SECTIONS
 # =============================================================================
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs([
+tab13, tab10, tab18, tab1, tab2, tab3, tab4, tab6, tab5, tab7, tab8, tab11, tab12, tab9, tab14, tab15, tab16, tab17 = st.tabs([
+    "Executive Summary",
+    "Assumptions Lab",
+    "Accounting & GL",
     "Income Statement",
     "Cash Flow & Balance Sheet",
     "Scenarios",
     "Sensitivity",
-    "Monte Carlo",
     "Breakeven",
+    "Monte Carlo",
     "Variance Analysis",
     "KPI Scorecard",
-    "Cost Drivers",
-    "Assumptions Lab",
     "Rolling Forecast",
     "Unit Economics",
-    "Executive Summary",
+    "Cost Drivers",
+    "DCF Valuation",
+    "Time-Block Revenue",
+    "Metrics Reference",
+    "Model Integrity",
 ])
 
 # --- TAB 1: Income Statement ---
@@ -280,13 +315,21 @@ with tab2:
     with c2:
         st.subheader("Key Ratios")
         display_ratios = ratios.copy()
-        for col in display_ratios.columns:
-            display_ratios[col] = display_ratios[col].apply(
-                lambda x: f"{x:.1%}" if isinstance(x, float) and abs(x) < 2
-                else f"{x:.2f}x" if isinstance(x, float) and abs(x) < 50
-                else f"${x:,.0f}" if isinstance(x, (int, float))
-                else ""
-            )
+        for idx in display_ratios.index:
+            for col in display_ratios.columns:
+                val = display_ratios.loc[idx, col]
+                if not isinstance(val, (int, float)):
+                    display_ratios.loc[idx, col] = ""
+                elif "Margin" in idx or "Return" in idx:
+                    display_ratios.loc[idx, col] = f"{val:.1%}"
+                elif "DSCR" in idx or "Debt" in idx:
+                    display_ratios.loc[idx, col] = f"{val:.2f}x"
+                elif "Cash Balance" in idx:
+                    display_ratios.loc[idx, col] = f"${val:,.0f}"
+                elif "Runway" in idx:
+                    display_ratios.loc[idx, col] = f"{val:.1f} mo"
+                else:
+                    display_ratios.loc[idx, col] = f"{val:.2f}"
         st.dataframe(display_ratios, use_container_width=True)
 
     # Cash balance trend (matplotlib)
@@ -308,16 +351,21 @@ with tab3:
     st.subheader("Scenario Comparison — Year 1")
     comparison = run_scenario_comparison()
 
-    # Format for display
+    # Format for display — row-aware formatting
     display_comp = comparison.copy()
-    for col in display_comp.columns:
-        display_comp[col] = display_comp[col].apply(
-            lambda x: f"{x:.1%}" if isinstance(x, float) and abs(x) < 1
-            else f"{x:.2f}x" if isinstance(x, float) and 1 <= abs(x) < 10
-            else f"${x:,.0f}" if isinstance(x, (int, float)) and abs(x) >= 10
-            else f"{x:.0f}" if isinstance(x, (int, float))
-            else str(x)
-        )
+    for idx in display_comp.index:
+        for col in display_comp.columns:
+            val = display_comp.loc[idx, col]
+            if not isinstance(val, (int, float)):
+                display_comp.loc[idx, col] = str(val)
+            elif "Rate" in idx or "Utilization" in idx:
+                display_comp.loc[idx, col] = f"{val:.1%}"
+            elif "DSCR" in idx:
+                display_comp.loc[idx, col] = f"{val:.2f}x"
+            elif "Hours" in idx:
+                display_comp.loc[idx, col] = f"{val:.0f}"
+            else:
+                display_comp.loc[idx, col] = f"${val:,.0f}"
     st.dataframe(display_comp, use_container_width=True)
 
     # Visual comparison (matplotlib)
@@ -866,10 +914,10 @@ with tab9:
         delta=f"${adj_pretax - orig_pretax:+,.0f}",
         delta_color="normal",
     )
-    # DSCR impact
+    # DSCR impact — DSCR = EBITDA / Total Debt Service
     annual_ds = a["debt"]["annual_principal_payment"] + interest
-    adj_dscr = (adj_pretax + depreciation) / annual_ds if annual_ds > 0 else 0
-    orig_dscr = (orig_pretax + depreciation) / annual_ds if annual_ds > 0 else 0
+    adj_dscr = adj_ebitda / annual_ds if annual_ds > 0 else 0
+    orig_dscr = orig_ebitda / annual_ds if annual_ds > 0 else 0
     imp4.metric(
         "Adjusted DSCR",
         f"{adj_dscr:.2f}x",
@@ -1510,6 +1558,977 @@ with tab13:
         f"Utilization: {summary['metadata']['utilization']:.1%} | "
         f"Forecast: {summary['metadata']['forecast_years']} years"
     )
+
+
+# --- TAB 14: DCF Valuation ---
+with tab14:
+    st.subheader("DCF Business Valuation")
+    st.caption(
+        f"WACC: {dcf_wacc:.1f}% | Terminal Growth: {dcf_terminal_g:.1f}% | "
+        f"Tax Rate: {dcf_tax_rate:.0f}% | Forecast: 5 years"
+    )
+
+    dcf = build_dcf_valuation(
+        daily_device_hours=daily_hours,
+        price_per_hour=price,
+        forecast_years=5,
+        wacc=dcf_wacc / 100,
+        terminal_growth_rate=dcf_terminal_g / 100,
+        tax_rate=dcf_tax_rate / 100,
+    )
+
+    # Valuation summary
+    st.markdown("### Valuation Summary")
+    v1, v2, v3, v4 = st.columns(4)
+    v1.metric("Enterprise Value", f"${dcf['enterprise_value']:,.0f}")
+    v2.metric("Equity Value", f"${dcf['equity_value']:,.0f}")
+    v3.metric("EV / EBITDA", f"{dcf['metrics']['ev_to_ebitda']:.1f}x")
+    v4.metric("ROI on Equity", f"{dcf['metrics']['roi_on_equity']:.1%}")
+
+    v5, v6, v7, v8 = st.columns(4)
+    v5.metric("PV of UFCFs", f"${dcf['pv_ufcf_total']:,.0f}")
+    v6.metric("PV of Terminal Value", f"${dcf['pv_terminal']:,.0f}")
+    v7.metric("TV as % of EV", f"{dcf['metrics']['tv_as_pct_of_ev']:.1%}")
+    v8.metric("ROI on Total Investment", f"{dcf['metrics']['roi_on_total_investment']:.1%}")
+
+    st.divider()
+
+    # Enterprise-to-Equity bridge chart
+    st.markdown("### Enterprise-to-Equity Value Bridge")
+    bridge_labels = ["PV of UFCFs", "PV of Terminal Value", "Enterprise Value", "Less: Net Debt", "Equity Value"]
+    bridge_values = [
+        dcf['pv_ufcf_total'],
+        dcf['pv_terminal'],
+        dcf['enterprise_value'],
+        -dcf['net_debt'],
+        dcf['equity_value'],
+    ]
+    bridge_colors = ["#4e79a7", "#4e79a7", "#59a14f", "#e15759", "#59a14f"]
+
+    fig_bridge, ax_bridge = plt.subplots(figsize=(9, 4))
+    ax_bridge.bar(bridge_labels, bridge_values, color=bridge_colors, width=0.5)
+    ax_bridge.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    ax_bridge.axhline(y=0, color="gray", linewidth=0.8, linestyle="--")
+    ax_bridge.set_title("DCF Valuation: Enterprise to Equity Bridge")
+    plt.xticks(rotation=15, fontsize=9)
+    plt.tight_layout()
+    st.pyplot(fig_bridge)
+    plt.close(fig_bridge)
+
+    # UFCF schedule
+    st.divider()
+    st.markdown("### Unlevered Free Cash Flow Schedule")
+    ufcf_df = dcf["ufcf_schedule"]
+    display_ufcf = ufcf_df.copy()
+    for idx in display_ufcf.index:
+        for col in display_ufcf.columns:
+            val = display_ufcf.loc[idx, col]
+            if not isinstance(val, (int, float)):
+                display_ufcf.loc[idx, col] = ""
+            elif "Tax Rate" in idx:
+                display_ufcf.loc[idx, col] = f"{val:.0%}"
+            else:
+                display_ufcf.loc[idx, col] = f"${val:,.0f}"
+    st.dataframe(display_ufcf, use_container_width=True)
+
+    # Discount factor detail
+    st.markdown("### Present Value Detail")
+    pv_rows = []
+    for i in range(len(dcf["ufcf_values"])):
+        pv_rows.append({
+            "Year": f"Year {i+1}",
+            "UFCF": f"${dcf['ufcf_values'][i]:,.0f}",
+            "Discount Factor": f"{1/dcf['discount_factors'][i]:.4f}",
+            "PV of UFCF": f"${dcf['pv_ufcfs'][i]:,.0f}",
+        })
+    pv_rows.append({
+        "Year": "Terminal",
+        "UFCF": f"${dcf['terminal_ufcf']:,.0f}",
+        "Discount Factor": f"{1/dcf['discount_factors'][-1]:.4f}",
+        "PV of UFCF": f"${dcf['pv_terminal']:,.0f}",
+    })
+    st.dataframe(pd.DataFrame(pv_rows), use_container_width=True, hide_index=True)
+
+    # DCF sensitivity table
+    st.divider()
+    st.markdown("### Sensitivity: Equity Value (WACC vs Terminal Growth)")
+    st.caption("How sensitive is the valuation to changes in WACC and terminal growth rate?")
+
+    dcf_sens = build_dcf_sensitivity(
+        daily_device_hours=daily_hours,
+        price_per_hour=price,
+        forecast_years=5,
+        tax_rate=dcf_tax_rate / 100,
+    )
+
+    def color_equity(val):
+        if isinstance(val, (int, float)):
+            if val == float('inf'):
+                return ""
+            if val > 0:
+                return "background-color: #d4edda"
+            else:
+                return "background-color: #f8d7da"
+        return ""
+
+    def fmt_equity(val):
+        if isinstance(val, (int, float)):
+            if val == float('inf'):
+                return "N/A"
+            return f"${val:,.0f}"
+        return str(val)
+
+    styled_dcf_sens = dcf_sens.style.map(color_equity).format(fmt_equity)
+    st.dataframe(styled_dcf_sens, use_container_width=True)
+
+    # Assumptions
+    st.divider()
+    st.caption(
+        f"Assumptions: WACC {dcf_wacc:.1f}% | Terminal Growth {dcf_terminal_g:.1f}% | "
+        f"Tax Rate {dcf_tax_rate:.0f}% | CapEx 2% of Rev | NWC 5% of Rev | "
+        f"Total Investment: ${dcf['metrics']['total_investment']:,} | "
+        f"Owner Equity: ${dcf['metrics']['owner_equity']:,}"
+    )
+
+
+# --- TAB 15: Time-Block Revenue ---
+with tab15:
+    st.subheader("Time-Block Revenue Model")
+    st.caption(
+        "Break the operating day into time blocks with different utilization "
+        "and pricing. Compare flat-rate vs time-block revenue."
+    )
+
+    # Time-block definitions
+    st.markdown("### Configure Time Blocks")
+    st.caption("Set utilization and price for each time segment (10 AM – 10 PM)")
+
+    tb_col1, tb_col2, tb_col3, tb_col4 = st.columns(4)
+
+    with tb_col1:
+        st.markdown("**Morning (10AM–1PM)**")
+        tb_morning_util = st.slider("Morning Util %", 5, 60, 12, 1, key="tb_m_u") / 100
+        tb_morning_price = st.slider("Morning $/hr", 5.0, 15.0, 7.00, 0.50, key="tb_m_p")
+
+    with tb_col2:
+        st.markdown("**Afternoon (1PM–5PM)**")
+        tb_afternoon_util = st.slider("Afternoon Util %", 5, 60, 18, 1, key="tb_a_u") / 100
+        tb_afternoon_price = st.slider("Afternoon $/hr", 5.0, 15.0, 9.00, 0.50, key="tb_a_p")
+
+    with tb_col3:
+        st.markdown("**Peak (5PM–9PM)**")
+        tb_peak_util = st.slider("Peak Util %", 5, 80, 35, 1, key="tb_pk_u") / 100
+        tb_peak_price = st.slider("Peak $/hr", 5.0, 18.0, 11.00, 0.50, key="tb_pk_p")
+
+    with tb_col4:
+        st.markdown("**Late Night (9PM–10PM)**")
+        tb_late_util = st.slider("Late Util %", 5, 60, 15, 1, key="tb_l_u") / 100
+        tb_late_price = st.slider("Late $/hr", 5.0, 15.0, 8.00, 0.50, key="tb_l_p")
+
+    st.divider()
+
+    # Calculate time-block revenue
+    stations = a["capacity"]["total_devices"]
+    days_yr = a["capacity"]["days_per_year"]
+
+    time_blocks = [
+        {"Block": "Morning (10AM–1PM)", "Hours": 3, "Utilization": tb_morning_util, "Price": tb_morning_price},
+        {"Block": "Afternoon (1PM–5PM)", "Hours": 4, "Utilization": tb_afternoon_util, "Price": tb_afternoon_price},
+        {"Block": "Peak (5PM–9PM)", "Hours": 4, "Utilization": tb_peak_util, "Price": tb_peak_price},
+        {"Block": "Late Night (9PM–10PM)", "Hours": 1, "Utilization": tb_late_util, "Price": tb_late_price},
+    ]
+
+    tb_rows = []
+    total_tb_daily_rev = 0
+    total_tb_daily_hours = 0
+    for block in time_blocks:
+        max_station_hrs = stations * block["Hours"]
+        sold_hrs = max_station_hrs * block["Utilization"]
+        daily_rev = sold_hrs * block["Price"]
+        total_tb_daily_rev += daily_rev
+        total_tb_daily_hours += sold_hrs
+        tb_rows.append({
+            "Time Block": block["Block"],
+            "Duration (hrs)": block["Hours"],
+            "Max Station-Hrs": max_station_hrs,
+            "Utilization": f"{block['Utilization']:.0%}",
+            "Hours Sold": f"{sold_hrs:.0f}",
+            "Price/Hr": f"${block['Price']:.2f}",
+            "Daily Revenue": f"${daily_rev:,.0f}",
+        })
+
+    tb_rows.append({
+        "Time Block": "TOTAL",
+        "Duration (hrs)": 12,
+        "Max Station-Hrs": stations * 12,
+        "Utilization": f"{total_tb_daily_hours / (stations * 12):.1%}",
+        "Hours Sold": f"{total_tb_daily_hours:.0f}",
+        "Price/Hr": f"${total_tb_daily_rev / total_tb_daily_hours:.2f}" if total_tb_daily_hours > 0 else "$0",
+        "Daily Revenue": f"${total_tb_daily_rev:,.0f}",
+    })
+
+    st.markdown("### Time-Block Revenue Breakdown")
+    st.dataframe(pd.DataFrame(tb_rows), use_container_width=True, hide_index=True)
+
+    # Comparison: flat vs time-block
+    st.divider()
+    st.markdown("### Flat-Rate vs Time-Block Comparison")
+
+    flat_daily_rev = daily_hours * price
+    flat_annual = flat_daily_rev * days_yr
+    tb_annual = total_tb_daily_rev * days_yr
+    revenue_delta = tb_annual - flat_annual
+
+    comp1, comp2, comp3, comp4 = st.columns(4)
+    comp1.metric("Flat-Rate Annual", f"${flat_annual:,.0f}",
+                 help=f"{daily_hours} hrs × ${price:.2f} × 365")
+    comp2.metric("Time-Block Annual", f"${tb_annual:,.0f}",
+                 help="Sum of all block revenues × 365")
+    comp3.metric("Revenue Uplift", f"${revenue_delta:+,.0f}",
+                 delta=f"{revenue_delta/flat_annual:+.1%}" if flat_annual else None)
+    comp4.metric("Blended Rate", f"${total_tb_daily_rev/total_tb_daily_hours:.2f}/hr" if total_tb_daily_hours > 0 else "N/A",
+                 help="Effective average price per hour across all blocks")
+
+    # Visual: revenue by block
+    st.markdown("### Revenue by Time Block")
+    block_names = [b["Block"] for b in time_blocks]
+    block_revs = [b["Utilization"] * stations * b["Hours"] * b["Price"] * days_yr for b in time_blocks]
+    block_colors = ["#76b7b2", "#4e79a7", "#59a14f", "#f28e2b"]
+
+    fig_tb, ax_tb = plt.subplots(figsize=(8, 4))
+    bars = ax_tb.bar(block_names, block_revs, color=block_colors, width=0.5)
+    ax_tb.axhline(y=flat_annual / 4, color="red", linewidth=1, linestyle="--",
+                  label=f"Flat avg per block: ${flat_annual/4:,.0f}")
+    ax_tb.set_ylabel("Annual Revenue ($)")
+    ax_tb.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+    ax_tb.set_title("Annual Gaming Revenue by Time Block")
+    ax_tb.legend(fontsize=8)
+    for bar, rev in zip(bars, block_revs):
+        ax_tb.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
+                   f"${rev:,.0f}", ha="center", va="bottom", fontsize=8)
+    plt.xticks(fontsize=9)
+    plt.tight_layout()
+    st.pyplot(fig_tb)
+    plt.close(fig_tb)
+
+    # Utilization heatmap
+    st.markdown("### Daily Utilization Profile")
+    util_data = {b["Block"]: [b["Utilization"]] for b in time_blocks}
+    util_df = pd.DataFrame(util_data, index=["Utilization"])
+
+    fig_util, ax_util = plt.subplots(figsize=(8, 1.5))
+    util_vals = [b["Utilization"] for b in time_blocks]
+    bar_colors_util = []
+    for u in util_vals:
+        if u >= 0.30:
+            bar_colors_util.append("#59a14f")
+        elif u >= 0.20:
+            bar_colors_util.append("#f28e2b")
+        else:
+            bar_colors_util.append("#e15759")
+    ax_util.barh(["Utilization"], [time_blocks[0]["Hours"]], left=0, color=bar_colors_util[0], label=f"Morning: {util_vals[0]:.0%}")
+    left = time_blocks[0]["Hours"]
+    for i in range(1, len(time_blocks)):
+        ax_util.barh(["Utilization"], [time_blocks[i]["Hours"]], left=left,
+                     color=bar_colors_util[i], label=f"{time_blocks[i]['Block'].split('(')[0].strip()}: {util_vals[i]:.0%}")
+        left += time_blocks[i]["Hours"]
+    ax_util.set_xlabel("Hours of Day")
+    ax_util.set_title("Operating Day — Color = Utilization (Green > 30%, Orange > 20%, Red < 20%)")
+    ax_util.legend(fontsize=7, ncol=4, loc="upper center", bbox_to_anchor=(0.5, -0.3))
+    plt.tight_layout()
+    st.pyplot(fig_util)
+    plt.close(fig_util)
+
+
+# --- TAB 16: Financial Metrics Reference ---
+with tab16:
+    st.subheader("Financial Metrics Reference")
+    st.caption("Searchable reference of key financial metrics used in this model")
+
+    # Metrics database
+    METRICS_DB = [
+        {"Category": "Profitability", "Metric": "Gross Margin", "Formula": "Gross Profit ÷ Revenue",
+         "Meaning": "% of revenue retained after direct costs (COGS). For service businesses like gaming arenas, expect 95%+.",
+         "Good Range": "> 50%", "Used In": "Income Statement, KPI Scorecard"},
+        {"Category": "Profitability", "Metric": "EBITDA Margin", "Formula": "EBITDA ÷ Revenue",
+         "Meaning": "Operating profitability before non-cash charges and financing. Shows core business earning power.",
+         "Good Range": "> 15%", "Used In": "Income Statement, Executive Summary"},
+        {"Category": "Profitability", "Metric": "Pre-Tax Margin", "Formula": "Pre-Tax Income ÷ Revenue",
+         "Meaning": "Bottom-line profitability before taxes. Captures full P&L including debt service impact.",
+         "Good Range": "> 5%", "Used In": "Income Statement, Scenarios"},
+        {"Category": "Profitability", "Metric": "Return on Assets (ROA)", "Formula": "Pre-Tax Income ÷ Total Assets",
+         "Meaning": "How efficiently assets generate income. Measures capital deployment effectiveness.",
+         "Good Range": "> 5%", "Used In": "Ratios"},
+        {"Category": "Profitability", "Metric": "Return on Equity (ROE)", "Formula": "Pre-Tax Income ÷ Owner Equity",
+         "Meaning": "Return generated for the owner. High leverage amplifies this (both up and down).",
+         "Good Range": "> 15%", "Used In": "Ratios"},
+        {"Category": "Leverage", "Metric": "DSCR (Debt Service Coverage)", "Formula": "EBITDA ÷ (Interest + Principal)",
+         "Meaning": "Can the business pay its debt? SBA minimum is 1.25x. Below 1.0x means cash shortfall.",
+         "Good Range": "> 1.25x", "Used In": "Ratios, KPI Scorecard, Breakeven, Monte Carlo"},
+        {"Category": "Leverage", "Metric": "Debt-to-Equity", "Formula": "Total Liabilities ÷ Total Equity",
+         "Meaning": "Financial leverage. Higher = more debt-financed. SBA-funded startups are typically high.",
+         "Good Range": "< 3.0x", "Used In": "Ratios, Balance Sheet"},
+        {"Category": "Liquidity", "Metric": "Cash Runway", "Formula": "Cash Balance ÷ Monthly OpEx",
+         "Meaning": "Months of operations cash can sustain without revenue. Safety buffer measure.",
+         "Good Range": "> 3 months", "Used In": "Ratios, Executive Summary"},
+        {"Category": "Operations", "Metric": "Utilization Rate", "Formula": "Daily Hours Sold ÷ Max Daily Hours",
+         "Meaning": "THE #1 KPI. % of available capacity being used. Drives revenue and unit economics.",
+         "Good Range": "> 20%", "Used In": "Unit Economics, Scenarios, Breakeven"},
+        {"Category": "Operations", "Metric": "Revenue per Station per Day", "Formula": "Total Revenue ÷ (Stations × 365)",
+         "Meaning": "Daily productivity of each gaming station. Key operational efficiency metric.",
+         "Good Range": "> $20", "Used In": "Unit Economics"},
+        {"Category": "Operations", "Metric": "Contribution Margin per Hour", "Formula": "(Gaming Rev - Variable Costs) ÷ Hours Sold",
+         "Meaning": "Incremental profit from selling one more hour. Pricing floor for promotions.",
+         "Good Range": "> $5", "Used In": "Unit Economics"},
+        {"Category": "Valuation", "Metric": "EV / EBITDA", "Formula": "Enterprise Value ÷ EBITDA",
+         "Meaning": "How many years of EBITDA the business is 'worth.' Lower = cheaper valuation.",
+         "Good Range": "4-8x", "Used In": "DCF Valuation"},
+        {"Category": "Valuation", "Metric": "WACC", "Formula": "Weighted avg of cost of equity and cost of debt",
+         "Meaning": "Discount rate for DCF. Represents the minimum return investors require.",
+         "Good Range": "8-15%", "Used In": "DCF Valuation"},
+        {"Category": "Valuation", "Metric": "Terminal Value", "Formula": "UFCF × (1+g) ÷ (WACC - g)",
+         "Meaning": "Value of all cash flows beyond the explicit forecast period. Often 60-80% of total EV.",
+         "Good Range": "< 75% of EV", "Used In": "DCF Valuation"},
+        {"Category": "Valuation", "Metric": "Unlevered Free Cash Flow (UFCF)", "Formula": "NOPAT + D&A - CapEx - ΔNWC",
+         "Meaning": "Cash flow available to all capital providers (debt + equity). The DCF input.",
+         "Good Range": "Positive", "Used In": "DCF Valuation"},
+        {"Category": "Variance", "Metric": "MAPE", "Formula": "Mean of |Actual - Budget| ÷ |Budget|",
+         "Meaning": "Average forecast error. Lower = better forecasting. <5% is excellent.",
+         "Good Range": "< 10%", "Used In": "Rolling Forecast"},
+        {"Category": "Variance", "Metric": "Forecast Bias", "Formula": "Mean of (Actual - Budget)",
+         "Meaning": "Systematic over/under-forecasting. Positive = conservative budget.",
+         "Good Range": "Near $0", "Used In": "Rolling Forecast"},
+        {"Category": "Cost", "Metric": "Operating Leverage", "Formula": "Fixed Costs ÷ Total Costs",
+         "Meaning": "How much of cost base is fixed. Higher = more upside from revenue growth, more downside risk.",
+         "Good Range": "Context-dependent", "Used In": "Unit Economics"},
+        {"Category": "Cost", "Metric": "Occupancy Cost Ratio", "Formula": "Rent ÷ Revenue",
+         "Meaning": "Rent burden relative to revenue. Retail rule of thumb: <25% for viability.",
+         "Good Range": "< 25%", "Used In": "Executive Summary, Cost Drivers"},
+        {"Category": "Payback", "Metric": "Equipment Payback Period", "Formula": "Total Startup Cost ÷ Annual EBITDA × 12",
+         "Meaning": "Months until cumulative EBITDA covers initial investment. Shorter = better.",
+         "Good Range": "< 36 months", "Used In": "Unit Economics"},
+    ]
+
+    # Search filter
+    search_term = st.text_input("Search metrics", "", placeholder="Type to filter (e.g., DSCR, margin, cash)...")
+    category_filter = st.multiselect(
+        "Filter by category",
+        options=sorted(set(m["Category"] for m in METRICS_DB)),
+        default=[],
+    )
+
+    # Apply filters
+    filtered = METRICS_DB
+    if search_term:
+        search_lower = search_term.lower()
+        filtered = [m for m in filtered
+                    if search_lower in m["Metric"].lower()
+                    or search_lower in m["Meaning"].lower()
+                    or search_lower in m["Formula"].lower()]
+    if category_filter:
+        filtered = [m for m in filtered if m["Category"] in category_filter]
+
+    st.caption(f"Showing {len(filtered)} of {len(METRICS_DB)} metrics")
+
+    # Display as cards
+    for m in filtered:
+        cat_colors = {
+            "Profitability": "#4e79a7", "Leverage": "#e15759", "Liquidity": "#76b7b2",
+            "Operations": "#59a14f", "Valuation": "#f28e2b", "Variance": "#edc948",
+            "Cost": "#b07aa1", "Payback": "#ff9da7",
+        }
+        color = cat_colors.get(m["Category"], "#888")
+        st.markdown(
+            f"<div style='border-left:4px solid {color};padding:12px;margin-bottom:10px;"
+            f"background:#f8f9fa;border-radius:4px;'>"
+            f"<div style='font-weight:700;font-size:15px;'>{m['Metric']}"
+            f"<span style='font-size:11px;color:{color};margin-left:8px;'>[{m['Category']}]</span></div>"
+            f"<div style='font-family:monospace;color:#555;margin:4px 0;'>{m['Formula']}</div>"
+            f"<div style='color:#333;'>{m['Meaning']}</div>"
+            f"<div style='font-size:12px;color:#666;margin-top:4px;'>"
+            f"Target: <b>{m['Good Range']}</b> | Used in: {m['Used In']}</div>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+
+# --- TAB 17: Model Integrity ---
+with tab17:
+    st.subheader("Model Integrity Checks")
+    st.caption(
+        "Automated validation of balance sheet balances, cross-statement consistency, "
+        "DSCR recalculation, and reasonableness checks."
+    )
+
+    integrity_checks = run_integrity_checks(
+        daily_device_hours=daily_hours,
+        price_per_hour=price,
+        forecast_years=forecast_years,
+    )
+    integrity_summary = summarize_integrity(integrity_checks)
+
+    # Overall scorecard
+    overall_status = integrity_summary["overall"]
+    if "FAIL" in overall_status:
+        overall_bg = "#f8d7da"
+        overall_tc = "#721c24"
+    elif "warning" in overall_status.lower():
+        overall_bg = "#fff3cd"
+        overall_tc = "#856404"
+    else:
+        overall_bg = "#d4edda"
+        overall_tc = "#155724"
+
+    st.markdown(
+        f"<div style='background:{overall_bg};padding:16px;border-radius:8px;"
+        f"border-left:6px solid {overall_tc};margin-bottom:16px;'>"
+        f"<div style='font-size:24px;font-weight:700;color:{overall_tc};'>{overall_status}</div>"
+        f"<div style='font-size:14px;color:{overall_tc};'>"
+        f"{integrity_summary['passed']} passed | "
+        f"{integrity_summary['failed']} failed | "
+        f"{integrity_summary['warnings']} warnings | "
+        f"Pass rate: {integrity_summary['pass_rate']:.0%}</div>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Summary metrics
+    ic1, ic2, ic3, ic4 = st.columns(4)
+    ic1.metric("Total Checks", f"{integrity_summary['total_checks']}")
+    ic2.metric("Passed", f"{integrity_summary['passed']}", delta_color="normal")
+    ic3.metric("Failed", f"{integrity_summary['failed']}",
+               delta=f"{integrity_summary['failed']}" if integrity_summary['failed'] > 0 else None,
+               delta_color="inverse")
+    ic4.metric("Critical Failures", f"{integrity_summary['critical_failures']}",
+               delta=f"{integrity_summary['critical_failures']}" if integrity_summary['critical_failures'] > 0 else None,
+               delta_color="inverse")
+
+    st.divider()
+
+    # Detailed check results by category
+    st.markdown("### Check Results by Category")
+
+    categories = sorted(set(c["Category"] for c in integrity_checks))
+    for cat in categories:
+        cat_checks = [c for c in integrity_checks if c["Category"] == cat]
+        cat_passed = sum(1 for c in cat_checks if c["Status"] == "PASS")
+        cat_total = len(cat_checks)
+
+        with st.expander(f"{cat} — {cat_passed}/{cat_total} passed", expanded=(cat_passed < cat_total)):
+            for c in cat_checks:
+                if c["Status"] == "PASS":
+                    icon = "✅"
+                    bg = "#d4edda"
+                elif c["Status"] == "FAIL":
+                    icon = "❌"
+                    bg = "#f8d7da"
+                else:
+                    icon = "⚠️"
+                    bg = "#fff3cd"
+
+                st.markdown(
+                    f"<div style='background:{bg};padding:8px 12px;border-radius:4px;margin-bottom:4px;'>"
+                    f"{icon} <b>{c['Check']}</b> "
+                    f"<span style='font-size:11px;color:#666;'>[{c['Severity']}]</span><br>"
+                    f"<span style='font-size:12px;color:#555;'>{c['Detail']}</span>"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+    # Full results table
+    st.divider()
+    st.markdown("### Full Results Table")
+    check_df = pd.DataFrame(integrity_checks)
+
+    def color_check_status(val):
+        if val == "PASS":
+            return "background-color: #d4edda; color: #155724; font-weight: bold"
+        elif val == "FAIL":
+            return "background-color: #f8d7da; color: #721c24; font-weight: bold"
+        elif val == "WARNING":
+            return "background-color: #fff3cd; color: #856404; font-weight: bold"
+        return ""
+
+    def color_severity(val):
+        if val == "CRITICAL":
+            return "color: #721c24; font-weight: bold"
+        elif val == "HIGH":
+            return "color: #856404; font-weight: bold"
+        return ""
+
+    styled_checks = check_df.style.map(color_check_status, subset=["Status"]).map(
+        color_severity, subset=["Severity"]
+    )
+    st.dataframe(styled_checks, use_container_width=True, hide_index=True)
+
+
+# --- TAB 18: Accounting & GL ---
+with tab18:
+    st.subheader("Accounting & General Ledger")
+    st.caption(
+        "GAAP double-entry accounting flow: Journal Entries → General Ledger → "
+        "Trial Balance → Financial Statements. All transactions for Year 1 (monthly)."
+    )
+
+    # ---- Sub-section selector ----
+    acct_section = st.radio(
+        "Section",
+        ["Chart of Accounts", "Journal Entries", "General Ledger",
+         "Trial Balance", "GL → Financial Statements"],
+        horizontal=True,
+    )
+
+    st.divider()
+
+    # ---- CHART OF ACCOUNTS ----
+    if acct_section == "Chart of Accounts":
+        st.markdown("### Chart of Accounts (GAAP Structure)")
+        st.caption(
+            "Standard GAAP numbering: 1xxx = Assets, 2xxx = Liabilities, "
+            "3xxx = Equity, 4xxx = Revenue, 5xxx = COGS, 6xxx = OpEx, 7xxx = Other. "
+            "Normal balance shows the side that increases the account."
+        )
+
+        coa_df = get_chart_of_accounts_df()
+
+        # Color by type
+        type_colors = {
+            "Asset": "#4e79a7", "Liability": "#e15759", "Equity": "#59a14f",
+            "Revenue": "#76b7b2", "Expense": "#f28e2b",
+        }
+
+        def color_acct_type(val):
+            color = type_colors.get(val, "#888")
+            return f"color: {color}; font-weight: bold"
+
+        styled_coa = coa_df.style.map(color_acct_type, subset=["Type"])
+        st.dataframe(styled_coa, use_container_width=True, hide_index=True, height=700)
+
+        # Visual: account distribution
+        st.markdown("### Account Distribution by Type")
+        type_counts = coa_df["Type"].value_counts()
+        fig_coa, ax_coa = plt.subplots(figsize=(6, 3))
+        bars_coa = ax_coa.barh(
+            type_counts.index.tolist(),
+            type_counts.values.tolist(),
+            color=[type_colors.get(t, "#888") for t in type_counts.index],
+        )
+        ax_coa.set_xlabel("Number of Accounts")
+        ax_coa.set_title("Chart of Accounts by Type")
+        for bar, count in zip(bars_coa, type_counts.values):
+            ax_coa.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height()/2,
+                       str(count), va="center", fontsize=10)
+        plt.tight_layout()
+        st.pyplot(fig_coa)
+        plt.close(fig_coa)
+
+    # ---- JOURNAL ENTRIES ----
+    elif acct_section == "Journal Entries":
+        st.markdown("### Journal Entries — Year 1 (Monthly)")
+        st.caption(
+            "Every business transaction is recorded as a journal entry with equal "
+            "debits and credits. This is the foundation of double-entry bookkeeping."
+        )
+
+        je_df = get_journal_entries_df(daily_device_hours=daily_hours, price_per_hour=price)
+        n_entries = je_df["JE #"].nunique()
+        total_dr = je_df["Debit"].sum()
+        total_cr = je_df["Credit"].sum()
+
+        # Summary metrics
+        je_m1, je_m2, je_m3, je_m4 = st.columns(4)
+        je_m1.metric("Total Entries", f"{n_entries}")
+        je_m2.metric("Total Lines", f"{len(je_df)}")
+        je_m3.metric("Total Debits", f"${total_dr:,.0f}")
+        je_m4.metric("Total Credits", f"${total_cr:,.0f}")
+
+        st.divider()
+
+        # Filter controls
+        je_filter_col1, je_filter_col2 = st.columns(2)
+        with je_filter_col1:
+            month_filter = st.selectbox(
+                "Filter by Month",
+                ["All"] + sorted(je_df["Date"].unique().tolist(),
+                                key=lambda x: int(x.split()[-1]) if x != "Month 0" else -1),
+            )
+        with je_filter_col2:
+            ref_filter = st.selectbox(
+                "Filter by Type",
+                ["All"] + sorted(je_df["Reference"].unique().tolist()),
+            )
+
+        display_je = je_df.copy()
+        if month_filter != "All":
+            display_je = display_je[display_je["Date"] == month_filter]
+        if ref_filter != "All":
+            display_je = display_je[display_je["Reference"] == ref_filter]
+
+        # Format for display
+        display_je_fmt = display_je.copy()
+        display_je_fmt["Debit"] = display_je_fmt["Debit"].apply(
+            lambda x: f"${x:,.2f}" if x > 0 else "")
+        display_je_fmt["Credit"] = display_je_fmt["Credit"].apply(
+            lambda x: f"${x:,.2f}" if x > 0 else "")
+
+        st.dataframe(display_je_fmt, use_container_width=True, hide_index=True, height=600)
+
+        # JE type breakdown
+        st.divider()
+        st.markdown("### Entry Breakdown by Type")
+        je_by_ref = je_df.groupby("Reference").agg(
+            Entries=("JE #", "nunique"),
+            Total_Debits=("Debit", "sum"),
+        ).sort_values("Total_Debits", ascending=False)
+
+        fig_je, ax_je = plt.subplots(figsize=(8, 3.5))
+        ref_colors = {"Opening": "#4e79a7", "Revenue": "#59a14f", "COGS": "#e15759",
+                      "OpEx": "#f28e2b", "Non-Cash": "#76b7b2", "Financing": "#b07aa1"}
+        colors_je = [ref_colors.get(r, "#888") for r in je_by_ref.index]
+        ax_je.barh(je_by_ref.index.tolist(), je_by_ref["Total_Debits"].tolist(), color=colors_je)
+        ax_je.set_xlabel("Total Debits ($)")
+        ax_je.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+        ax_je.set_title("Journal Entries by Category — Total Activity")
+        plt.tight_layout()
+        st.pyplot(fig_je)
+        plt.close(fig_je)
+
+    # ---- GENERAL LEDGER ----
+    elif acct_section == "General Ledger":
+        st.markdown("### General Ledger — Monthly Running Balances")
+        st.caption(
+            "The GL is the master accounting record. Every journal entry is posted here, "
+            "organized by account with running balances. Select an account to see its full ledger."
+        )
+
+        gl_df = build_general_ledger(daily_device_hours=daily_hours, price_per_hour=price)
+
+        # Account selector
+        acct_options = []
+        for acct_num, info in CHART_OF_ACCOUNTS.items():
+            acct_gl = gl_df[gl_df["Account #"] == acct_num]
+            if not acct_gl.empty:
+                ending = acct_gl.iloc[-1]["Balance"]
+                acct_options.append(f"{acct_num} — {info['name']} (Bal: ${ending:,.0f})")
+
+        selected_acct_str = st.selectbox("Select Account", acct_options)
+        selected_acct = selected_acct_str.split(" — ")[0] if selected_acct_str else "1000"
+
+        acct_info = CHART_OF_ACCOUNTS[selected_acct]
+        st.markdown(
+            f"**{acct_info['name']}** | Type: {acct_info['type'].title()} | "
+            f"Normal Balance: {acct_info['normal_balance'].title()} | "
+            f"Maps to: {acct_info['fs']} → {acct_info['fs_line']}"
+        )
+
+        acct_ledger = gl_df[gl_df["Account #"] == selected_acct].copy()
+
+        # Format for display
+        display_gl = acct_ledger[["Date", "JE #", "Description", "Debit", "Credit", "Balance"]].copy()
+        display_gl["Debit"] = display_gl["Debit"].apply(
+            lambda x: f"${x:,.2f}" if pd.notna(x) and x > 0 else "")
+        display_gl["Credit"] = display_gl["Credit"].apply(
+            lambda x: f"${x:,.2f}" if pd.notna(x) and x > 0 else "")
+        display_gl["Balance"] = display_gl["Balance"].apply(lambda x: f"${x:,.2f}")
+
+        st.dataframe(display_gl, use_container_width=True, hide_index=True, height=500)
+
+        # Balance trend chart
+        if not acct_ledger.empty and len(acct_ledger) > 1:
+            st.markdown(f"### {acct_info['name']} — Balance Over Time")
+            fig_gl, ax_gl = plt.subplots(figsize=(9, 3.5))
+            bal_vals = acct_ledger["Balance"].tolist()
+            ax_gl.plot(range(len(bal_vals)), bal_vals, marker=".", linewidth=1.5, color="#4e79a7")
+            ax_gl.fill_between(range(len(bal_vals)), bal_vals, alpha=0.1, color="#4e79a7")
+            ax_gl.set_ylabel("Balance ($)")
+            ax_gl.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+            ax_gl.set_xlabel("Transaction #")
+            ax_gl.set_title(f"Account {selected_acct} — Running Balance")
+            plt.tight_layout()
+            st.pyplot(fig_gl)
+            plt.close(fig_gl)
+
+        # Monthly summary for this account
+        monthly_summary = build_monthly_gl_summary(daily_device_hours=daily_hours, price_per_hour=price)
+        acct_monthly = monthly_summary[monthly_summary["Account #"] == selected_acct]
+        if not acct_monthly.empty:
+            st.divider()
+            st.markdown("### Monthly Activity Summary")
+            display_monthly = acct_monthly[["Month", "Total Debits", "Total Credits", "Ending Balance"]].copy()
+            display_monthly["Total Debits"] = display_monthly["Total Debits"].apply(
+                lambda x: f"${x:,.2f}" if x > 0 else "")
+            display_monthly["Total Credits"] = display_monthly["Total Credits"].apply(
+                lambda x: f"${x:,.2f}" if x > 0 else "")
+            display_monthly["Ending Balance"] = display_monthly["Ending Balance"].apply(
+                lambda x: f"${x:,.2f}")
+            st.dataframe(display_monthly, use_container_width=True, hide_index=True)
+
+    # ---- TRIAL BALANCE ----
+    elif acct_section == "Trial Balance":
+        st.markdown("### Trial Balance — Year 1 Ending")
+        st.caption(
+            "The Trial Balance lists every GL account with its ending debit or credit balance. "
+            "Total Debits MUST equal Total Credits — this proves the books are in balance. "
+            "The TB is the checkpoint between the GL and financial statements."
+        )
+
+        tb_df = build_trial_balance(daily_device_hours=daily_hours, price_per_hour=price)
+        tb_valid = validate_trial_balance(tb_df)
+
+        # Balance check badge
+        if tb_valid["is_balanced"]:
+            st.markdown(
+                "<div style='background:#d4edda;padding:12px;border-radius:8px;"
+                "border-left:6px solid #155724;margin-bottom:16px;'>"
+                "<div style='font-size:18px;font-weight:700;color:#155724;'>"
+                "TRIAL BALANCE IS IN BALANCE</div>"
+                f"<div style='color:#155724;'>Total Debits: ${tb_valid['total_debits']:,.2f} = "
+                f"Total Credits: ${tb_valid['total_credits']:,.2f}</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                "<div style='background:#f8d7da;padding:12px;border-radius:8px;"
+                "border-left:6px solid #721c24;margin-bottom:16px;'>"
+                "<div style='font-size:18px;font-weight:700;color:#721c24;'>"
+                "TRIAL BALANCE OUT OF BALANCE</div>"
+                f"<div style='color:#721c24;'>Debits: ${tb_valid['total_debits']:,.2f} | "
+                f"Credits: ${tb_valid['total_credits']:,.2f} | "
+                f"Difference: ${tb_valid['difference']:,.2f}</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+        # Summary metrics
+        tb_m1, tb_m2, tb_m3 = st.columns(3)
+        tb_m1.metric("Total Debits", f"${tb_valid['total_debits']:,.2f}")
+        tb_m2.metric("Total Credits", f"${tb_valid['total_credits']:,.2f}")
+        tb_m3.metric("Accounts with Balances",
+                     f"{sum(1 for _, r in tb_df.iterrows() if r['Debit'] > 0 or r['Credit'] > 0)}")
+
+        st.divider()
+
+        # Trial Balance table
+        display_tb = tb_df.copy()
+
+        def color_tb_type(val):
+            type_colors_tb = {
+                "Asset": "color: #4e79a7; font-weight: bold",
+                "Liability": "color: #e15759; font-weight: bold",
+                "Equity": "color: #59a14f; font-weight: bold",
+                "Revenue": "color: #76b7b2; font-weight: bold",
+                "Expense": "color: #f28e2b; font-weight: bold",
+            }
+            return type_colors_tb.get(val, "")
+
+        # Format numbers
+        display_tb["Debit"] = display_tb["Debit"].apply(
+            lambda x: f"${x:,.2f}" if x > 0 else "")
+        display_tb["Credit"] = display_tb["Credit"].apply(
+            lambda x: f"${x:,.2f}" if x > 0 else "")
+
+        styled_tb = display_tb.style.map(color_tb_type, subset=["Type"])
+        st.dataframe(styled_tb, use_container_width=True, hide_index=True, height=700)
+
+        # Totals row
+        st.markdown(
+            f"<div style='background:#f0f0f0;padding:10px;border-radius:4px;font-family:monospace;'>"
+            f"<b>TOTALS</b> &nbsp;&nbsp;&nbsp; "
+            f"Debits: <b>${tb_valid['total_debits']:,.2f}</b> &nbsp;&nbsp; "
+            f"Credits: <b>${tb_valid['total_credits']:,.2f}</b>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
+        # Visual: balance composition
+        st.divider()
+        st.markdown("### Trial Balance Composition")
+        tb_by_type = tb_df.groupby("Type").agg(
+            Debits=("Debit", "sum"),
+            Credits=("Credit", "sum"),
+        )
+
+        fig_tb_comp, ax_tb_comp = plt.subplots(figsize=(8, 4))
+        x_pos_tb = range(len(tb_by_type))
+        width_tb = 0.35
+        ax_tb_comp.bar([p - width_tb/2 for p in x_pos_tb], tb_by_type["Debits"],
+                      width=width_tb, label="Debits", color="#4e79a7")
+        ax_tb_comp.bar([p + width_tb/2 for p in x_pos_tb], tb_by_type["Credits"],
+                      width=width_tb, label="Credits", color="#e15759")
+        ax_tb_comp.set_xticks(list(x_pos_tb))
+        ax_tb_comp.set_xticklabels(tb_by_type.index.tolist())
+        ax_tb_comp.set_ylabel("Amount ($)")
+        ax_tb_comp.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+        ax_tb_comp.legend()
+        ax_tb_comp.set_title("Trial Balance — Debits vs Credits by Account Type")
+        plt.tight_layout()
+        st.pyplot(fig_tb_comp)
+        plt.close(fig_tb_comp)
+
+    # ---- GL → FINANCIAL STATEMENTS ----
+    elif acct_section == "GL → Financial Statements":
+        st.markdown("### GL → Financial Statement Mapping")
+        st.caption(
+            "This shows exactly how each GL account rolls into the Income Statement "
+            "or Balance Sheet. The accounting system PRODUCES the financial statements — "
+            "this is the bridge."
+        )
+
+        fs_map = build_fs_mapping(daily_device_hours=daily_hours, price_per_hour=price)
+        totals_fs = fs_map["totals"]
+
+        # GAAP flow diagram
+        st.markdown(
+            "<div style='background:#f8f9fa;padding:16px;border-radius:8px;"
+            "border:1px solid #dee2e6;margin-bottom:16px;font-family:monospace;'>"
+            "<div style='font-weight:700;font-size:14px;margin-bottom:8px;'>GAAP Accounting Flow</div>"
+            "<div>Transactions → <b>Journal Entries</b> (debits & credits)</div>"
+            "<div>&nbsp;&nbsp;&nbsp;&nbsp;→ Post to <b>General Ledger</b> (running balances)</div>"
+            "<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ <b>Trial Balance</b> (DR = CR check)</div>"
+            "<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"
+            "→ <b>Income Statement</b> (Revenue & Expense accounts)</div>"
+            "<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"
+            "→ <b>Balance Sheet</b> (Asset, Liability & Equity accounts)</div>"
+            "<div>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"
+            "→ <b>Cash Flow Statement</b> (derived from BS changes + IS)</div>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        # Income Statement mapping
+        st.markdown("### Income Statement (from Revenue & Expense Accounts)")
+        is_rows = []
+        for item in fs_map["income_statement"]:
+            acct_type = CHART_OF_ACCOUNTS[item["Account #"]]["type"]
+            sign = -1 if acct_type == "revenue" else 1  # revenue is positive on IS
+            is_rows.append({
+                "Account #": item["Account #"],
+                "Account Name": item["Account Name"],
+                "FS Line": item["FS Line"],
+                "GL Balance": item["Balance"],
+                "IS Impact": -item["Balance"] if acct_type == "revenue" else item["Balance"],
+            })
+
+        is_map_df = pd.DataFrame(is_rows)
+
+        # Summary metrics
+        is_c1, is_c2, is_c3, is_c4, is_c5 = st.columns(5)
+        is_c1.metric("Revenue", f"${totals_fs['total_revenue']:,.0f}")
+        is_c2.metric("Gross Profit", f"${totals_fs['gross_profit']:,.0f}")
+        is_c3.metric("EBITDA", f"${totals_fs['ebitda']:,.0f}")
+        is_c4.metric("EBIT", f"${totals_fs['ebit']:,.0f}")
+        is_c5.metric("Pre-Tax Income", f"${totals_fs['pretax_income']:,.0f}")
+
+        display_is_map = is_map_df.copy()
+        display_is_map["GL Balance"] = display_is_map["GL Balance"].apply(lambda x: f"${x:,.2f}")
+
+        def color_is_impact(val):
+            if isinstance(val, (int, float)):
+                return "color: #59a14f" if val < 0 else "color: #e15759"
+            return ""
+
+        display_is_map["IS Impact"] = display_is_map["IS Impact"].apply(lambda x: f"${x:,.2f}")
+        st.dataframe(display_is_map, use_container_width=True, hide_index=True)
+
+        st.divider()
+
+        # Balance Sheet mapping
+        st.markdown("### Balance Sheet (from Asset, Liability & Equity Accounts)")
+
+        bs_c1, bs_c2, bs_c3 = st.columns(3)
+        bs_c1.metric("Total Assets", f"${totals_fs['total_assets']:,.0f}")
+        bs_c2.metric("Total Liabilities", f"${totals_fs['total_liabilities']:,.0f}")
+        bs_c3.metric("Total Equity", f"${totals_fs['total_equity']:,.0f}")
+
+        bs_map_rows = []
+        for item in fs_map["balance_sheet"]:
+            bs_map_rows.append({
+                "Account #": item["Account #"],
+                "Account Name": item["Account Name"],
+                "Type": CHART_OF_ACCOUNTS[item["Account #"]]["type"].title(),
+                "FS Line": item["FS Line"],
+                "Ending Balance": item["Balance"],
+            })
+
+        bs_map_df = pd.DataFrame(bs_map_rows)
+        display_bs_map = bs_map_df.copy()
+        display_bs_map["Ending Balance"] = display_bs_map["Ending Balance"].apply(
+            lambda x: f"${x:,.2f}" if x > 0 else "")
+
+        def color_bs_type(val):
+            bs_colors = {
+                "Asset": "color: #4e79a7; font-weight: bold",
+                "Liability": "color: #e15759; font-weight: bold",
+                "Equity": "color: #59a14f; font-weight: bold",
+            }
+            return bs_colors.get(val, "")
+
+        styled_bs_map = display_bs_map.style.map(color_bs_type, subset=["Type"])
+        st.dataframe(styled_bs_map, use_container_width=True, hide_index=True)
+
+        # Accounting equation check
+        st.divider()
+        a_eq = totals_fs["total_assets"]
+        le_eq = totals_fs["total_liabilities"] + totals_fs["total_equity"]
+        # Note: need to add net income to equity for full balance
+        le_eq_with_ni = le_eq + totals_fs["pretax_income"]
+        eq_balanced = abs(a_eq - le_eq_with_ni) < 1.0
+
+        st.markdown("### Accounting Equation Check")
+        st.caption("Assets = Liabilities + Equity + Net Income (before closing)")
+
+        if eq_balanced:
+            st.markdown(
+                f"<div style='background:#d4edda;padding:14px;border-radius:8px;"
+                f"border-left:6px solid #155724;'>"
+                f"<div style='font-size:16px;font-weight:700;color:#155724;'>"
+                f"BALANCED: Assets ${a_eq:,.0f} = L+E+NI ${le_eq_with_ni:,.0f}</div>"
+                f"<div style='color:#155724;font-size:13px;'>"
+                f"Assets: ${a_eq:,.0f} | Liabilities: ${totals_fs['total_liabilities']:,.0f} | "
+                f"Equity: ${totals_fs['total_equity']:,.0f} | "
+                f"Net Income: ${totals_fs['pretax_income']:,.0f}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f"<div style='background:#f8d7da;padding:14px;border-radius:8px;"
+                f"border-left:6px solid #721c24;'>"
+                f"<div style='font-size:16px;font-weight:700;color:#721c24;'>"
+                f"OUT OF BALANCE: Assets ${a_eq:,.0f} ≠ L+E+NI ${le_eq_with_ni:,.0f}</div>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+        # Visual: waterfall from GL to financial statements
+        st.divider()
+        st.markdown("### Income Statement Buildup (from GL)")
+        buildup_labels = ["Revenue", "(-) COGS", "Gross Profit", "(-) OpEx", "EBITDA",
+                         "(-) Depreciation", "EBIT", "(-) Interest", "Pre-Tax Income"]
+        buildup_values = [
+            totals_fs["total_revenue"],
+            -totals_fs["total_cogs"],
+            totals_fs["gross_profit"],
+            -totals_fs["total_opex"],
+            totals_fs["ebitda"],
+            -totals_fs["depreciation"],
+            totals_fs["ebit"],
+            -totals_fs["interest"],
+            totals_fs["pretax_income"],
+        ]
+        buildup_colors = ["#59a14f" if v >= 0 else "#e15759" for v in buildup_values]
+
+        fig_buildup, ax_buildup = plt.subplots(figsize=(10, 4.5))
+        ax_buildup.bar(buildup_labels, buildup_values, color=buildup_colors, width=0.6)
+        ax_buildup.axhline(y=0, color="gray", linewidth=0.8, linestyle="--")
+        ax_buildup.set_ylabel("Amount ($)")
+        ax_buildup.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, _: f"${x:,.0f}"))
+        ax_buildup.set_title("Income Statement Buildup — From GL Account Balances")
+        plt.xticks(rotation=25, ha="right", fontsize=9)
+        plt.tight_layout()
+        st.pyplot(fig_buildup)
+        plt.close(fig_buildup)
 
 
 # =============================================================================
