@@ -703,7 +703,7 @@ def build_kpi_scorecard(
         {
             "KPI": "DSCR",
             "Target": 1.25,
-            "Actual": (a_pretax + a_assumptions["depreciation"]["annual_depreciation"]) / annual_debt_service,
+            "Actual": a_ebitda / annual_debt_service if annual_debt_service > 0 else 0,
             "Unit": "x",
             "Higher Is Better": True,
         },
