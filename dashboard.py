@@ -944,7 +944,7 @@ with tab9:
             "Expense": name,
             "Original": f"${orig_val:,.0f}",
             "Adjusted": f"${adj_val:,.0f}",
-            "Change ($)": f"${delta:+,.0f}" if delta != 0 else "—",
+            "Change ($)": f"${delta:+,.0f}" if delta != 0 else "$0",
             "Adjustable": "Yes" if name in adjustments_map else "",
         })
 
@@ -953,14 +953,14 @@ with tab9:
         "Expense": "Payroll Taxes & Benefits",
         "Original": f"${payroll_tax_base:,.0f}",
         "Adjusted": f"${adj_payroll_tax:,.0f}",
-        "Change ($)": f"${adj_payroll_tax - payroll_tax_base:+,.0f}" if adj_payroll_tax != payroll_tax_base else "—",
+        "Change ($)": f"${adj_payroll_tax - payroll_tax_base:+,.0f}" if adj_payroll_tax != payroll_tax_base else "$0",
         "Adjustable": "(auto)",
     })
 
     comp_df = pd.DataFrame(comparison_rows)
 
     def highlight_changes(row):
-        if row["Change ($)"] != "—":
+        if row["Change ($)"] != "$0":
             return ["background-color: #fff3cd"] * len(row)
         return [""] * len(row)
 
@@ -1745,26 +1745,29 @@ with tab15:
         max_station_hrs = stations * block["Hours"]
         sold_hrs = max_station_hrs * block["Utilization"]
         daily_rev = sold_hrs * block["Price"]
+        annual_rev = daily_rev * days_yr
         total_tb_daily_rev += daily_rev
         total_tb_daily_hours += sold_hrs
         tb_rows.append({
             "Time Block": block["Block"],
-            "Duration (hrs)": block["Hours"],
-            "Max Station-Hrs": max_station_hrs,
+            "Duration (hrs)": str(block["Hours"]),
+            "Max Station-Hrs": str(max_station_hrs),
             "Utilization": f"{block['Utilization']:.0%}",
             "Hours Sold": f"{sold_hrs:.0f}",
             "Price/Hr": f"${block['Price']:.2f}",
             "Daily Revenue": f"${daily_rev:,.0f}",
+            "Annual Revenue": f"${annual_rev:,.0f}",
         })
 
     tb_rows.append({
         "Time Block": "TOTAL",
-        "Duration (hrs)": 12,
-        "Max Station-Hrs": stations * 12,
+        "Duration (hrs)": "12",
+        "Max Station-Hrs": str(stations * 12),
         "Utilization": f"{total_tb_daily_hours / (stations * 12):.1%}",
         "Hours Sold": f"{total_tb_daily_hours:.0f}",
         "Price/Hr": f"${total_tb_daily_rev / total_tb_daily_hours:.2f}" if total_tb_daily_hours > 0 else "$0",
         "Daily Revenue": f"${total_tb_daily_rev:,.0f}",
+        "Annual Revenue": f"${total_tb_daily_rev * days_yr:,.0f}",
     })
 
     st.markdown("### Time-Block Revenue Breakdown")
@@ -1909,6 +1912,54 @@ with tab16:
          "Good Range": "< 36 months", "Used In": "Unit Economics"},
     ]
 
+    # Compute live model values for Year 1
+    y1_rev_mr = inc.loc["Total Revenue", y1]
+    y1_gp_mr = inc.loc["Gross Profit", y1]
+    y1_ebitda_mr = inc.loc["EBITDA", y1]
+    y1_ebit_mr = inc.loc["EBIT (Operating Income)", y1]
+    y1_pretax_mr = inc.loc["Pre-Tax Income", y1]
+    y1_total_assets_mr = bs.loc["Total Assets", y1] if "Total Assets" in bs.index else 0
+    y1_total_equity_mr = bs.loc["Total Equity", y1] if "Total Equity" in bs.index else a["debt"]["owner_equity"]
+    y1_dscr_mr = ratios.loc["DSCR", y1] if "DSCR" in ratios.index else 0
+    y1_dte_mr = ratios.loc["Debt-to-Equity", y1] if "Debt-to-Equity" in ratios.index else 0
+    y1_cash_bal_mr = cf.loc["Ending Cash Balance", y1] if "Ending Cash Balance" in cf.index else 0
+    y1_monthly_opex_mr = sum(amt for _, _, amt in OPEX_BUDGET) / 12
+    y1_cash_runway_mr = y1_cash_bal_mr / y1_monthly_opex_mr if y1_monthly_opex_mr > 0 else 0
+    y1_util_mr = calc_utilization(daily_hours)
+    y1_rev_per_station_mr = y1_rev_mr / (a["capacity"]["total_devices"] * 365)
+    y1_gaming_rev_mr = inc.loc["Gaming Revenue", y1]
+    y1_var_costs_mr = y1_rev_mr * a["fees"]["merchant_processing_pct"]
+    y1_contrib_mr = (y1_gaming_rev_mr - y1_var_costs_mr) / (daily_hours * 365) if daily_hours > 0 else 0
+    y1_rent_mr = 78_000
+    y1_occ_ratio_mr = y1_rent_mr / y1_rev_mr if y1_rev_mr > 0 else 0
+    y1_total_costs_mr = sum(amt for _, _, amt in OPEX_BUDGET)
+    y1_fixed_costs_mr = sum(amt for _, cat, amt in OPEX_BUDGET if cat == "fixed")
+    y1_op_leverage_mr = y1_fixed_costs_mr / y1_total_costs_mr if y1_total_costs_mr > 0 else 0
+    y1_payback_mr = (a["debt"]["total_project_cost"] / y1_ebitda_mr * 12) if y1_ebitda_mr > 0 else float('inf')
+
+    LIVE_VALUES = {
+        "Gross Margin": f"{y1_gp_mr / y1_rev_mr:.1%}" if y1_rev_mr else "N/A",
+        "EBITDA Margin": f"{y1_ebitda_mr / y1_rev_mr:.1%}" if y1_rev_mr else "N/A",
+        "Pre-Tax Margin": f"{y1_pretax_mr / y1_rev_mr:.1%}" if y1_rev_mr else "N/A",
+        "Return on Assets (ROA)": f"{y1_pretax_mr / y1_total_assets_mr:.1%}" if y1_total_assets_mr else "N/A",
+        "Return on Equity (ROE)": f"{y1_pretax_mr / y1_total_equity_mr:.1%}" if y1_total_equity_mr else "N/A",
+        "DSCR (Debt Service Coverage)": f"{y1_dscr_mr:.2f}x",
+        "Debt-to-Equity": f"{y1_dte_mr:.2f}x",
+        "Cash Runway": f"{y1_cash_runway_mr:.1f} months",
+        "Utilization Rate": f"{y1_util_mr:.1%}",
+        "Revenue per Station per Day": f"${y1_rev_per_station_mr:.2f}",
+        "Contribution Margin per Hour": f"${y1_contrib_mr:.2f}",
+        "EV / EBITDA": "See DCF tab",
+        "WACC": f"{dcf_wacc:.1f}%",
+        "Terminal Value": "See DCF tab",
+        "Unlevered Free Cash Flow (UFCF)": "See DCF tab",
+        "MAPE": "See Rolling Forecast tab",
+        "Forecast Bias": "See Rolling Forecast tab",
+        "Operating Leverage": f"{y1_op_leverage_mr:.1%}",
+        "Occupancy Cost Ratio": f"{y1_occ_ratio_mr:.1%}",
+        "Equipment Payback Period": f"{y1_payback_mr:.1f} months" if y1_payback_mr != float('inf') else "N/A (negative EBITDA)",
+    }
+
     # Search filter
     search_term = st.text_input("Search metrics", "", placeholder="Type to filter (e.g., DSCR, margin, cash)...")
     category_filter = st.multiselect(
@@ -1930,7 +1981,7 @@ with tab16:
 
     st.caption(f"Showing {len(filtered)} of {len(METRICS_DB)} metrics")
 
-    # Display as cards
+    # Display as cards with live values
     for m in filtered:
         cat_colors = {
             "Profitability": "#4e79a7", "Leverage": "#e15759", "Liquidity": "#76b7b2",
@@ -1938,11 +1989,15 @@ with tab16:
             "Cost": "#b07aa1", "Payback": "#ff9da7",
         }
         color = cat_colors.get(m["Category"], "#888")
+        live_val = LIVE_VALUES.get(m["Metric"], "—")
         st.markdown(
             f"<div style='border-left:4px solid {color};padding:12px;margin-bottom:10px;"
             f"background:#f8f9fa;border-radius:4px;'>"
+            f"<div style='display:flex;justify-content:space-between;align-items:baseline;'>"
             f"<div style='font-weight:700;font-size:15px;'>{m['Metric']}"
             f"<span style='font-size:11px;color:{color};margin-left:8px;'>[{m['Category']}]</span></div>"
+            f"<div style='font-size:20px;font-weight:700;color:{color};'>{live_val}</div>"
+            f"</div>"
             f"<div style='font-family:monospace;color:#555;margin:4px 0;'>{m['Formula']}</div>"
             f"<div style='color:#333;'>{m['Meaning']}</div>"
             f"<div style='font-size:12px;color:#666;margin-top:4px;'>"
